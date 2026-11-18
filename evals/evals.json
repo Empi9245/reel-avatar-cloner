@@ -1,0 +1,75 @@
+{
+  "skill": "reel-avatar-cloner",
+  "version": "2.0.0",
+  "description": "Scenario tests for reel-avatar-cloner. A run passes only when every item in 'expect' is satisfied.",
+  "evals": [
+    {
+      "name": "1-to-1-reference-clone-with-eva-and-custom-edits",
+      "input": "Clone this reference Reel in Italian using @Eva, keep the UI cards identical to the original, hide every mention of the brand name for curiosity gap, and export separate cuts for Instagram and TikTok.",
+      "expect": [
+        "audits the original MP4 via 1fps contact sheet and zoomed PIP crops before drafting any prompts",
+        "scrubs every forbidden brand mention across spoken dialogue, kinetic captions, browser URL bars, terminal installs, brand squircles, and DM preview cards",
+        "generates or adapts separate closing clips and cards for Instagram (commenta 'PROMO') and TikTok (seguici sul profilo e scrivi 'PROMO' in DM)",
+        "keeps real/vector UI graphics razor-sharp in Remotion or temporal_4dof instead of regenerating screens with AI video"
+      ]
+    },
+    {
+      "name": "3d-alpha-popout-pip-no-flat-head-chop",
+      "input": "Eva looks cut off at the top of her head inside the PIP box while the original creator's head pops out above the rounded UI card.",
+      "expect": [
+        "never fixes the cutout with CSS overflow:hidden or opaque JPEG/MP4 matte baking that leaves rectangular halos on CREAM_PAPER/WHITE backgrounds",
+        "uses scripts/gflow_batch_ingest.py popout-pip to render 1036x850 VP9 yuva420p .webm (alpha_mode=1) framing chest-up shoulders and hand gestures (y_offset=42)",
+        "renders the PIP layer in Remotion with <OffthreadVideo transparent={src.endsWith('.webm')} /> and overflow:'visible'"
+      ]
+    },
+    {
+      "name": "credit-conservation-single-model-and-0-credit-lab-grade",
+      "input": "The first half of Eva's Flow clips look slightly over-bright ('accesi'). Should we switch to veo-fast or regenerate them?",
+      "expect": [
+        "runs python scripts/gflow_batch_ingest.py check ($0 cost) before any generation and stops at mid-batch checkpoints when requested",
+        "refuses to switch models mid-reel (stays strictly locked on omni-1.2-flash @ 360p for cross-clip skin, lighting, and vocal coherence)",
+        "fixes exposure/brightness drift at 0 credits using python scripts/gflow_batch_ingest.py grade --gamma 1.10 (LAB luminance + midtone curve) instead of re-generating"
+      ]
+    },
+    {
+      "name": "google-flow-status-4-cta-safety-filter-bypass",
+      "input": "The closing CTA clip failed on Google Flow with status 4 in ~11 seconds right before finishing.",
+      "expect": [
+        "identifies that Flow's multilingual safety filter blocks private-messaging solicitation ('ti mando in privato / D-M', 'in messaggio', 'warm closing smile')",
+        "replaces the closing wrapper with the proven neutral body wrapper ('enthusiastic, relatable creator energy') and safe 3rd-person phrasing ('Seguici e scrivi promo nei commenti...' for IG / 'Seguici sul profilo e scrivi promo...' for TikTok)"
+      ]
+    },
+    {
+      "name": "ban-boomerang-loops-and-collar-telea-in-v2v",
+      "input": "The reference creator's PIP cuts are only 1.2s long. Let's boomerang-loop them to 5s and run Telea over his collar mic so we can use them as V2V driving clips.",
+      "expect": [
+        "explicitly bans boomerang looping short <3s fragments and bans Telea inpainting across collar/chest inside V2V references",
+        "routes sub-3s multi-cut UI reels to Flow Ingredients (Images Only: eva_con_tshirt.png + master room still + @Voice, zero V2V video) so natural human choreography and manual duration work cleanly"
+      ]
+    },
+    {
+      "name": "piecewise-linear-audio-first-remotion-timing",
+      "input": "Eva's Italian lines take 1.15x longer than the fast English reference speaker. Squeeze her clips with global atempo=1.18 so the frame indices don't change.",
+      "expect": [
+        "rejects aggressive global atempo > 1.08 that makes speech sound sped up or robotic",
+        "trims leading/trailing silences sample-accurately (gflow_batch_ingest.py trim --adaptive-loudnorm) and maps Remotion sequences + KineticCaption timings piecewise-linearly via mapEvaFrame so every clip remains within natural 0.93x-1.06x tempo"
+      ]
+    },
+    {
+      "name": "temporal-4dof-broll-cleaning-no-single-frame-telea",
+      "input": "Remove the English caption burned over this panning handheld MacBook UI shot.",
+      "expect": [
+        "uses mode: 'temporal_4dof' (cv2.estimateAffinePartial2D donor alignment + ring illumination matching + horizontal fallback on hover state transitions)",
+        "never uses single-frame 2D Telea across moving laptop UI cards"
+      ]
+    },
+    {
+      "name": "cross-skill-ecosystem-integration",
+      "input": "Upgrade our Reel animations, captions behind Eva's head, audio J-cuts, SFX, and Italian post copy without reinventing the patterns already installed.",
+      "expect": [
+        "integrates reverse-any-video (frame-exact cuts, ink-box sizing), motion-doctrine + cut-the-curve (Vector Law, Waterfall Entry §6, 10/65/25 Nudge Curve §7, Rack-Focus, ban on idle wobble), seam-craft (#root opaque stage ground), and oversized-cursor",
+        "applies captions-overlay (drop/rail/embed + Overlay Law y=H/2) with VP9 alpha WebM depth layering, remotion-markup SFX (-24..-28 dBFS) + 3-5f J-cuts, and validates hooks/copy with ig-reel (hookscore.py) and ig-human (humanize.py / detect.py)"
+      ]
+    }
+  ]
+}
