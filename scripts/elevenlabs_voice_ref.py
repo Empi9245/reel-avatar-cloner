@@ -28,6 +28,10 @@ DEFAULT_STABILITY = 0.78
 DEFAULT_SIMILARITY = 0.86
 DEFAULT_STYLE = 0.0
 DEFAULT_SEED = 424242
+EXPRESSIVE_TTS_STABILITY = 0.42
+EXPRESSIVE_TTS_SIMILARITY = 0.84
+EXPRESSIVE_TTS_STYLE = 0.18
+EXPRESSIVE_TTS_SPEED = 0.98
 DEFAULT_VOICE_SAMPLE = Path(__file__).resolve().parent.parent / "resources" / "eva_voice_master.wav"
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 PLACEHOLDER_VALUES = {
@@ -159,6 +163,7 @@ def synthesize_tts(
     stability: float | None = DEFAULT_STABILITY,
     similarity_boost: float | None = DEFAULT_SIMILARITY,
     style: float | None = DEFAULT_STYLE,
+    speed: float | None = None,
     use_speaker_boost: bool = True,
     seed: int | None = DEFAULT_SEED,
     previous_request_ids: list[str] | None = None,
@@ -186,6 +191,8 @@ def synthesize_tts(
         voice_settings["similarity_boost"] = float(similarity_boost)
     if style is not None:
         voice_settings["style"] = float(style)
+    if speed is not None:
+        voice_settings["speed"] = float(speed)
     body["voice_settings"] = voice_settings
 
     url = f"{ELEVENLABS_BASE_URL}/text-to-speech/{voice_id}?output_format={output_format}"
@@ -212,7 +219,9 @@ def synthesize_tts(
         audio_bytes, req_id = _post(body)
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="ignore")
-        cleaned = dict(body)
+        cleaned = json.loads(json.dumps(body))
+        if exc.code in (400, 422) and "speed" in cleaned.get("voice_settings", {}) and "speed" in err_body.lower():
+            cleaned["voice_settings"].pop("speed", None)
         if exc.code in (400, 422) and "previous_request_ids" in cleaned and "request" in err_body.lower():
             cleaned.pop("previous_request_ids", None)
             if previous_text:
@@ -235,6 +244,7 @@ def synthesize_tts(
                 if exc2.code in (400, 404, 422) and model_id == DEFAULT_MODEL_ID and "model" in err_body2.lower():
                     cleaned["model_id"] = FALLBACK_MODEL_ID
                     cleaned.pop("previous_request_ids", None)
+                    cleaned.get("voice_settings", {}).pop("speed", None)
                     used_model = FALLBACK_MODEL_ID
                     print(
                         f"[warn] {DEFAULT_MODEL_ID} unavailable on this account/endpoint; falling back to {FALLBACK_MODEL_ID}.",
@@ -248,6 +258,7 @@ def synthesize_tts(
         elif exc.code in (400, 404, 422) and model_id == DEFAULT_MODEL_ID and "model" in err_body.lower():
             cleaned["model_id"] = FALLBACK_MODEL_ID
             cleaned.pop("previous_request_ids", None)
+            cleaned.get("voice_settings", {}).pop("speed", None)
             used_model = FALLBACK_MODEL_ID
             print(
                 f"[warn] {DEFAULT_MODEL_ID} unavailable on this account/endpoint; falling back to {FALLBACK_MODEL_ID}.",
@@ -754,6 +765,160 @@ def _save_voice_id_to_env(env_path: Path | None, voice_id: str) -> Path:
     return target
 
 
+def assemble_timeline_voiceover(
+    *,
+    timeline_json: Path,
+    video_in: Path,
+    video_out: Path,
+    api_key: str = "",
+    voice_id: str = "",
+    model_id: str = DEFAULT_MODEL_ID,
+    language_code: str | None = "it",
+    stability: float = EXPRESSIVE_TTS_STABILITY,
+    similarity_boost: float = EXPRESSIVE_TTS_SIMILARITY,
+    style: float = EXPRESSIVE_TTS_STYLE,
+    speed: float = EXPRESSIVE_TTS_SPEED,
+    use_speaker_boost: bool = True,
+    seed: int = DEFAULT_SEED,
+    timeline_audio_dir: Path | None = None,
+) -> list[dict]:
+    """Generate (or load) per-scene expressive voiceover and composite 1:1 onto video_in at -14 LUFS."""
+    ensure_binaries()
+    scenes = json.loads(timeline_json.read_text(encoding="utf-8"))
+    if not isinstance(scenes, list) or not scenes:
+        raise ValueError(f"Expected non-empty scene array in {timeline_json}")
+    video_dur = float(probe_media(video_in)["format"]["duration"])
+    sr = 48000
+    total_samples = max(1, int(round(video_dur * sr)))
+    mix_buf = array.array("h", [0]) * total_samples
+
+    video_out.parent.mkdir(parents=True, exist_ok=True)
+    clips_dir = video_out.parent / f"{video_out.stem}_scenes"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    prev_ids: list[str] = []
+    prev_txt: str | None = None
+    report: list[dict] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        for idx, sc in enumerate(scenes):
+            sid = str(sc.get("id") or f"s{idx + 1}")
+            start_s = float(sc["start_s"])
+            end_s = float(sc["end_s"])
+            text = str(sc["text"]).strip()
+            slot_dur = max(0.3, (end_s - start_s) - 0.10)
+
+            raw_audio: Path | None = None
+            if timeline_audio_dir:
+                for ext in (".mp3", ".wav", ".m4a"):
+                    cand = timeline_audio_dir / f"{sid}{ext}"
+                    if cand.is_file():
+                        raw_audio = cand
+                        break
+            if raw_audio is None:
+                if not api_key or not voice_id:
+                    raise RuntimeError(
+                        "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID required (or supply --timeline-audio-dir)."
+                    )
+                scene_mp3 = clips_dir / f"{sid}.mp3"
+                used_model, rid = synthesize_tts(
+                    api_key=api_key,
+                    voice_id=voice_id,
+                    text=text,
+                    model_id=model_id,
+                    output_mp3=scene_mp3,
+                    language_code=language_code,
+                    stability=stability,
+                    similarity_boost=similarity_boost,
+                    style=style,
+                    speed=speed,
+                    use_speaker_boost=use_speaker_boost,
+                    seed=seed,
+                    previous_request_ids=prev_ids,
+                    previous_text=prev_txt,
+                )
+                if rid:
+                    prev_ids.append(rid)
+                prev_txt = text
+                raw_audio = scene_mp3
+
+            clean_wav = tmp_dir / f"{sid}_clean.wav"
+            d_raw = _trim_and_clean_speech_wav(raw_audio, clean_wav, target_lufs=-16.0)
+            fitted_wav = tmp_dir / f"{sid}_fit.wav"
+            tempo = d_raw / slot_dur if d_raw > slot_dur else 1.0
+            tempo_clamped = max(1.0, min(1.12, tempo))
+            af = (f"atempo={tempo_clamped:.5f}," if tempo_clamped > 1.002 else "") + f"atrim=0:{slot_dur:.4f},asetpts=PTS-STARTPTS"
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", str(clean_wav), "-af", af, "-ar", str(sr), "-ac", "1", "-acodec", "pcm_s16le", str(fitted_wav)],
+                check=True,
+            )
+            with wave.open(str(fitted_wav), "rb") as wf:
+                seg_samples = array.array("h")
+                seg_samples.frombytes(wf.readframes(wf.getnframes()))
+            start_sample = max(0, int(round(start_s * sr)))
+            end_sample = min(total_samples, start_sample + len(seg_samples))
+            for k in range(end_sample - start_sample):
+                val = mix_buf[start_sample + k] + seg_samples[k]
+                mix_buf[start_sample + k] = max(-32767, min(32767, val))
+            report.append(
+                {
+                    "id": sid,
+                    "start_s": start_s,
+                    "end_s": end_s,
+                    "raw_s": round(d_raw, 3),
+                    "fitted_s": round((end_sample - start_sample) / float(sr), 3),
+                    "atempo": round(tempo_clamped, 3),
+                }
+            )
+
+        master_raw = tmp_dir / "timeline_raw.wav"
+        with wave.open(str(master_raw), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(mix_buf.tobytes())
+
+        # 2-pass linear broadcast master onto exact video duration (-14 LUFS)
+        master_af = "highpass=f=80,acompressor=threshold=-18dB:ratio=2.5:attack=5:release=60"
+        p1 = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(master_raw), "-af", f"{master_af},loudnorm=I=-14.0:TP=-1.5:LRA=7:print_format=json", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", p1.stderr, re.DOTALL)
+        if m:
+            ln = json.loads(m.group(0))
+            norm_af = (
+                f"{master_af},loudnorm=I=-14.0:TP=-1.5:LRA=7:"
+                f"measured_I={ln['input_i']}:measured_LRA={ln['input_lra']}:"
+                f"measured_TP={ln['input_tp']}:measured_thresh={ln['input_thresh']}:linear=true,"
+                f"apad,atrim=0:{video_dur:.4f},asetpts=PTS-STARTPTS"
+            )
+        else:
+            norm_af = f"{master_af},loudnorm=I=-14.0:TP=-1.5:LRA=7,apad,atrim=0:{video_dur:.4f},asetpts=PTS-STARTPTS"
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(video_in),
+                "-i", str(master_raw),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-af", norm_af,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-ar", str(sr),
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ],
+            check=True,
+        )
+    return report
+
+
 def export_black_video_whole_seconds(
     audio_path: Path,
     output_mp4: Path,
@@ -855,6 +1020,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STYLE,
         help=f"ElevenLabs style exaggeration (0.0-1.0, default: {DEFAULT_STYLE} to avoid pitch drift).",
     )
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=None,
+        help=f"Optional TTS speaking rate (e.g. {EXPRESSIVE_TTS_SPEED} with --expressive-tts).",
+    )
+    parser.add_argument(
+        "--expressive-tts",
+        action="store_true",
+        help=(
+            f"Use expressive dynamic TTS settings (stability={EXPRESSIVE_TTS_STABILITY}, "
+            f"similarity={EXPRESSIVE_TTS_SIMILARITY}, style={EXPRESSIVE_TTS_STYLE}, speed={EXPRESSIVE_TTS_SPEED}) "
+            "so voiceovers sound energetic and human rather than flat."
+        ),
+    )
+    parser.add_argument(
+        "--timeline-json",
+        help="Path to scenes JSON ([{id, start_s, end_s, text}]) to synthesize & sync voiceover onto --video-in.",
+    )
+    parser.add_argument(
+        "--timeline-audio-dir",
+        help="Optional directory with pre-generated scene MP3/WAV files (<id>.mp3) to assemble cleanly at $0 API cost.",
+    )
+    parser.add_argument("--video-in", help="Input MP4 video for --timeline-json voiceover assembly.")
+    parser.add_argument("--video-out", help="Output MP4 path for --timeline-json voiceover assembly.")
     parser.add_argument(
         "--seed",
         type=int,
@@ -960,6 +1150,48 @@ def main() -> int:
         out_wav = Path(args.golden_out).expanduser().resolve()
         dur_s, used = build_golden_voice_master(clips_dir, out_wav)
         print(f"[golden] Built {out_wav} ({dur_s:.2f}s, -16 LUFS) from {len(used)} clips: {', '.join(used)}")
+        return 0
+
+    eff_stability = EXPRESSIVE_TTS_STABILITY if args.expressive_tts and args.stability == DEFAULT_STABILITY else args.stability
+    eff_similarity = EXPRESSIVE_TTS_SIMILARITY if args.expressive_tts and args.similarity == DEFAULT_SIMILARITY else args.similarity
+    eff_style = EXPRESSIVE_TTS_STYLE if args.expressive_tts and args.style == DEFAULT_STYLE else args.style
+    eff_speed = EXPRESSIVE_TTS_SPEED if args.expressive_tts and args.speed is None else args.speed
+    speaker_boost = not args.no_speaker_boost
+
+    if args.timeline_json:
+        if not args.video_in or not args.video_out:
+            print("Provide both --video-in and --video-out with --timeline-json.", file=sys.stderr)
+            return 1
+        t_json = Path(args.timeline_json).expanduser().resolve()
+        v_in = Path(args.video_in).expanduser().resolve()
+        v_out = Path(args.video_out).expanduser().resolve()
+        aud_dir = Path(args.timeline_audio_dir).expanduser().resolve() if args.timeline_audio_dir else None
+        if not aud_dir and (not api_key or not voice_id):
+            print(
+                "MISSING CREDENTIALS: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID required for TTS timeline generation "
+                "(or pass --timeline-audio-dir with Web-generated scene MP3s).",
+                file=sys.stderr,
+            )
+            return 2
+        rep = assemble_timeline_voiceover(
+            timeline_json=t_json,
+            video_in=v_in,
+            video_out=v_out,
+            api_key=api_key,
+            voice_id=voice_id,
+            model_id=model_id,
+            language_code=args.language or "it",
+            stability=eff_stability,
+            similarity_boost=eff_similarity,
+            style=eff_style,
+            speed=eff_speed if eff_speed is not None else EXPRESSIVE_TTS_SPEED,
+            use_speaker_boost=speaker_boost,
+            seed=args.seed,
+            timeline_audio_dir=aud_dir,
+        )
+        print(f"[timeline] Assembled synced voiceover MP4 -> {v_out}")
+        for row in rep:
+            print(f"  - {row['id']}: {row['start_s']:.2f}s..{row['end_s']:.2f}s | raw={row['raw_s']:.2f}s fit={row['fitted_s']:.2f}s (atempo={row['atempo']}x)")
         return 0
 
     if args.clone_voice:
@@ -1093,9 +1325,10 @@ def main() -> int:
                     model_id=model_id,
                     output_mp3=chunk_mp3,
                     language_code=args.language,
-                    stability=args.stability,
-                    similarity_boost=args.similarity,
-                    style=args.style,
+                    stability=eff_stability,
+                    similarity_boost=eff_similarity,
+                    style=eff_style,
+                    speed=eff_speed,
                     use_speaker_boost=speaker_boost,
                     seed=args.seed,
                     previous_request_ids=prev_ids,
@@ -1129,9 +1362,10 @@ def main() -> int:
                 model_id=model_id,
                 output_mp3=out_mp3,
                 language_code=args.language,
-                stability=args.stability,
-                similarity_boost=args.similarity,
-                style=args.style,
+                stability=eff_stability,
+                similarity_boost=eff_similarity,
+                style=eff_style,
+                speed=eff_speed,
                 use_speaker_boost=speaker_boost,
                 seed=args.seed,
             )

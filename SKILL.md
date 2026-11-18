@@ -10,7 +10,7 @@ description: >-
   prompt generation (Google Flow / Seedance 2.5 / Higgsfield), VP9 true-alpha 3D pop-out PIP compositing in
   Remotion, and final multi-platform IG/TikTok assembly.
 metadata:
-  version: 2.1.0
+  version: 2.2.0
 license: MIT
 ---
 
@@ -23,7 +23,7 @@ All scripts and bundled assets live inside this skill folder:
 - Reusable Flow check, silence trim, LAB gamma=1.10 grading, `gen-room-anchor` multi-room relighting, `pick-anchor`, `match-audio` EQ/LUFS lock & VP9 true-alpha 3D pop-out PIP utility: [scripts/gflow_batch_ingest.py](./scripts/gflow_batch_ingest.py)
 - Local Unsloth MiniMax-H3 Ref2VA CLI bridge: [scripts/unsloth_h3_video.py](./scripts/unsloth_h3_video.py)
 - Direct Gemini API (Veo) CLI bridge (`GEMINI_API_KEY`): [scripts/gemini_veo_video.py](./scripts/gemini_veo_video.py)
-- ElevenLabs v4/v3 voice reference, 34s golden sample builder (`--build-golden-sample`), IVC cloning (`--clone-voice`), TTS request stitching (`--stitch-file`) & Single-Pass Concatenated Speech-to-Speech unification (`--unify-dir` with locked `stability=0.78, similarity=0.86, seed=424242`): [scripts/elevenlabs_voice_ref.py](./scripts/elevenlabs_voice_ref.py)
+- ElevenLabs v4/v3 voice reference, 34s golden sample builder (`--build-golden-sample`), IVC cloning (`--clone-voice`), expressive scene-synced voiceover assembly (`--expressive-tts --timeline-json --video-in --video-out`), TTS request stitching (`--stitch-file`) & Single-Pass Concatenated Speech-to-Speech unification (`--unify-dir` with locked `stability=0.78, similarity=0.86, seed=424242`): [scripts/elevenlabs_voice_ref.py](./scripts/elevenlabs_voice_ref.py)
 - `.env` template for ElevenLabs API credentials: [.env.example](./.env.example)
 - **Artistic direction, natural acting choreography, 3D alpha PIP compositing & 1:1 intake playbook:** [references/artistic-direction-and-realism.md](./references/artistic-direction-and-realism.md)
 - **Multi-clip consistency handbook, Single-Face Multi-Room Law, `gflow-cli` automation & local Unsloth MiniMax-H3 Ref2VA guide:** [references/multi-clip-consistency-and-local-h3.md](./references/multi-clip-consistency-and-local-h3.md)

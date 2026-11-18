@@ -68,7 +68,7 @@ reel-avatar-cloner/
 └── scripts/
     ├── gflow_batch_ingest.py                    # check, trim, grade, popout-pip, gen-room-anchor, pick-anchor, match-audio
     ├── reel_cloner.py                           # analyze, split, clean (temporal_4dof / pill_telea), caption, assemble, find-audio
-    ├── elevenlabs_voice_ref.py                  # Golden sample builder, IVC clone, single-pass concatenated STS & request stitching
+    ├── elevenlabs_voice_ref.py                  # Golden sample builder, IVC clone, expressive --timeline-json VO, request stitching & single-pass STS
     ├── gemini_veo_video.py                      # Direct Gemini API Veo generation bridge
     └── unsloth_h3_video.py                      # Local offline MiniMax-H3 Ref2VA CLI bridge
 ```
@@ -88,7 +88,10 @@ python scripts/gflow_batch_ingest.py gen-room-anchor --room-preset grey-plaster 
 python scripts/gflow_batch_ingest.py trim raw_01.mp4 --out trim_01.mp4 --adaptive-loudnorm
 python scripts/gflow_batch_ingest.py grade trim_01.mp4 --out grade_01.mp4 --room light-wall --gamma 1.10
 
-# 4. Lock vocal consistency: single-pass ElevenLabs STS (or 0-cost 8-band spectral EQ + -14 LUFS match)
+# 4. Generate expressive scene-synced voiceover onto a motion-graphics video (stability=0.42, style=0.18, -14 LUFS)
+python scripts/elevenlabs_voice_ref.py --expressive-tts --timeline-json scenes.json --video-in source.mp4 --video-out final_vo.mp4
+
+# 5. Lock vocal consistency across multi-clip AI takes (single-pass ElevenLabs STS or 0-cost 8-band EQ)
 python scripts/elevenlabs_voice_ref.py --unify-dir ./eva_clips
 python scripts/gflow_batch_ingest.py match-audio grade_02.mp4 --ref golden_04.mp4 --out matched_02.mp4
 

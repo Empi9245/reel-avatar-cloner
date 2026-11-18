@@ -1,6 +1,6 @@
 {
   "skill": "reel-avatar-cloner",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Scenario tests for reel-avatar-cloner. A run passes only when every item in 'expect' is satisfied.",
   "evals": [
     {
@@ -78,6 +78,15 @@
         "uses resources/eva_canonical_warm_armadio.png as the single canonical smartphone UGC anchor and runs gflow_batch_ingest.py gen-room-anchor (Stills-First Change-One-Variable relighting) to create Room B plates instead of mixing two conflicting faces in r2v",
         "extracts closed-mouth, hand-free rest stills via gflow_batch_ingest.py pick-anchor instead of open-toothed smile frames",
         "unifies multi-clip voice with ElevenLabs Single-Pass Concatenated STS (--unify-dir using stability=0.78, similarity_boost=0.86, style=0.0, use_speaker_boost=True, seed=424242 over pre-cleaned 34s golden master resources/eva_voice_master.wav) and/or local 8-band spectral EQ + -14 LUFS matching (gflow_batch_ingest.py match-audio)"
+      ]
+    },
+    {
+      "name": "voiceover-counterpoint-open-loop-and-expressive-tts-rhythm",
+      "input": "Add only @Eva's ElevenLabs voiceover to my motion-graphics Reel to maximize watch-through to the end and DM/comment keyword conversions, without sounding flat or robotic.",
+      "expect": [
+        "measures exact frame/second transition boundaries of the input MP4 first and structures Counterpoint voiceover lines (complementing UI card specifics rather than flatly reading bottom subtitles verbatim)",
+        "opens an immediate cost/curiosity loop, mixes 1-3 word micro-punches with crisp clauses + ellipses pauses (high burstiness), and lands a low-friction Zeigarnik keyword CTA",
+        "generates TTS via elevenlabs_voice_ref.py --expressive-tts (stability=0.42, similarity=0.84, style=0.18, speed=0.98 + Request Stitching) and --timeline-json --video-in --video-out mastered to -14 LUFS"
       ]
     }
   ]

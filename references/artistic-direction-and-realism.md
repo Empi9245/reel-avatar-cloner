@@ -83,6 +83,15 @@ Keep total prompt length focused (`< 200` words core `MCSLA`: *Model/Optics · C
 4. **`[Physical Choreography]`:** One concrete action beat per clip: subtle axial forward lean on the hook (`"leaning gently toward the lens"`), brief upward spatial glance/point toward upper UI cards when in PIP (`"glancing briefly toward the upper frame before locking dark-brown eyes onto the lens"`), one varied chest-level female hand gesture, natural breath pause at commas.
 5. **`[Dry Close-Mic Acoustics & Anti-CGI Negatives]`:** `"Voice Lock: 26-year-old female Northern Italian speaker..."` + spoken line verbatim with phonetic numerals + `"No extra or warped fingers, no rings, no plastic airbrushed skin, no beauty filter, no ring light, no subtitles, no music."`
 
+### E. High-Retention Voiceover Counterpoint, Open-Loop & Expressive TTS Rhythm Law (`v2.2.0`)
+Whenever adding a voiceover track over motion-graphics or UI screen videos (no talking head needed):
+1. **Counterpoint vs. On-Screen Text (Zero Redundant Reading):** Never read the bottom kinetic caption word-for-word when the UI card above holds richer visual proof. While the viewer's eyes read the short subtitle (`"gli dai un bug e lui lo riproduce"`), let `@Eva`'s voice name concrete details inside the screen (`"venti test"`, `"due righe"`, `"in un minuto"`, `"gratis"`), creating dual-channel curiosity rather than sensory fatigue.
+2. **High-Burstiness Expressive Cadence + Open Loops:** Avoid monotonous uniform 10-word sentences. Open an unresolved cost/curiosity loop in the first `0.0–1.5s`, slam the payoff at `1.5–3.2s`, mix 1–3 word micro-punches (`"Fermati."`, `"Poi?"`, `"La parte folle?"`) with sharp `8–12` word clauses, and insert ellipses (`...`) for organic breath pauses. Close on a **Zeigarnik micro-task** (`"Seguici e scrivimi promo in D-M..."` / `"scrivi promo nei commenti"`).
+3. **Expressive TTS vs. STS Slider Law (`elevenlabs_voice_ref.py`):**
+   - Speech-to-Speech (`--unify-dir`) keeps high stability (`0.78`, `style=0.0`) because human inflection already lives in the driving audio.
+   - Pure Text-to-Speech voiceovers (`--expressive-tts`) MUST lower stability (`stability=0.42, similarity_boost=0.84, style=0.18, speed=0.98`) with inline `eleven_v4`/`eleven_v3` emotional tags (`[skeptical]`, `[excited]`, `[confident]`, `[warmly]`) and Request Stitching (`previous_request_ids`) so cadence sounds energetic, punchy, and human.
+   - Sync scenes accurately to visual cut frames via `--timeline-json <scenes.json> --expressive-tts --video-in <src.mp4> --video-out <out.mp4>` (or `--timeline-audio-dir` for Web-generated MP3s), mastering at `-14.0 LUFS` without truncating words.
+
 ---
 
 ## 3. Integrated Skill Ecosystem & Cross-Skill Doctrines (Never Reinvent from Scratch)
