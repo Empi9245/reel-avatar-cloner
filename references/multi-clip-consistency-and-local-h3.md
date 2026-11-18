@@ -26,40 +26,53 @@ Every failure mode hit during multi-clip production and the permanent engineerin
 
 Works across **Google Flow (`Omni 1.2 Flash` / Veo)**, **MiniMax-H3 (`Ref2VA` / `FL2VA`)**, **Seedance 2.5 / Higgsfield**, **Wan 2.2**, and **Kling / Runway**:
 
-### Pillar 1 — Locked Dressed Identity Anchor (Never Head-Only)
-- Keep one canonical portrait showing face, hair, eyewear, jewelry, AND exact top/neckline (`resources/eva_con_tshirt.png`), or a 3-panel neutral 18% gray `Cast Kit v1` sheet.
-- Never contradict the anchor image inside the text prompt (e.g., don't ask for a different top when attaching `eva_con_tshirt.png`).
+### Pillar 1 — Locked Identity Anchor & The Single-Face Multi-Room Law (`v2.1.0`)
+- **Primary Canonical Smartphone UGC Anchor (`resources/eva_canonical_warm_armadio.png`):** Natural `24mm` front-camera chest-up perspective, relaxed closed-mouth expression, round tortoiseshell glasses, matte charcoal-black crew-neck t-shirt, thin gold chain, and authentic skin texture. Prefer `eva_canonical_warm_armadio.png` over studio flat headshots (`eva_front_single.png`) or over-grinned frames (`master_muro_grigio.png`) whenever shooting handheld UGC Reels.
+- **Why Room A vs. Room B Drifted Historically (`8–9/10` -> `10/10`):**
+  1. Never pass **two different faces** (`eva_con_tshirt.png` studio look + `master_room_with_face.png`) together into `r2v`—the generator blends features differently whenever the second image changes room lighting or smile geometry.
+  2. A wide toothy smile in a master still (`master_muro_grigio.png`) subtly alters jawline, cheek volume, and mouth proportions compared to relaxed neutral frames.
+- **Stills-First Relighting (`gen-room-anchor`) — Joey (`@noisygroup`) `Banana Pro Director` & `higgsfield-ai/skills` `MCSLA` Method:**
+  - Use the **"Change One Variable + Relight"** rule BEFORE generating video in Room B: run `gflow_batch_ingest.py gen-room-anchor` (`gflow image i2i` on `resources/eva_canonical_warm_armadio.png`) to place **the exact pixel-faithful `@Eva` identity** into the new room background (`grey-plaster`, `warm-cream`, or custom `--room-desc`) while matching directional window bounce light on hair/glasses/shoulders:
+    ```bash
+    python .agents/skills/reel-avatar-cloner/scripts/gflow_batch_ingest.py gen-room-anchor ^
+      --room-preset grey-plaster --model nano2 --out work/anchor_room_grey.png
+    ```
+  - Then feed **ONE single face anchor** per room (`eva_canonical_warm_armadio.png` for Warm Wardrobe, `anchor_room_grey.png` for Grey Wall — optionally paired ONLY with an empty/person-free `Location Sheet`), keeping prompt prose crisp (`< 200` words, **MCSLA**: *Model/Lens · Camera · Subject · Look/Light · Action*).
+  - Use `python .agents/skills/reel-avatar-cloner/scripts/gflow_batch_ingest.py pick-anchor <clip.mp4> --out anchor.png` to extract clean closed-mouth, hand-free rest stills automatically.
 
-### Pillar 2 — Star Topology via Master Scene Stills (Never Daisy-Chain Clips)
+### Pillar 2 — Star Topology via Clean Rest Plates (Never Daisy-Chain Clips)
 - **Why daisy-chaining fails:** Feeding `Clip 1 -> Clip 2 -> Clip 3 -> Clip 4` compounds compression blur, color shift, and facial geometry drift after 2–3 hops.
 - **How Star Topology works:**
-  1. **Group by unique room/camera setup** (e.g., Reel 11 has only 2 setups: Setup A = *Pale-Grey Wall*, Setup B = *Warm Wooden Wardrobe*).
+  1. **Group by unique room/camera setup** (e.g., Setup A = `anchor_room_grey.png`, Setup B = `eva_canonical_warm_armadio.png`).
   2. **Phase A (Masters):** Generate **1 Master Clip per unique room setup** first (`eva_01`, `eva_04`). Inspect eyes, hands, wardrobe, framing, and Italian pronunciation.
-  3. **Extract Clean Master Stills:** Grab one hand-free, neutral/mid-smile, sharp frame per setup (`master_muro_grigio.png`, `master_armadio.png`).
-  4. **Phase B (Spokes):** Anchor **every remaining clip** directly to the immutable hub `(master_room.png + eva_con_tshirt.png)` — never from intermediate Phase B clips. Every spoke stays at generation distance `1` from the master room and character anchor.
+  3. **Verify Rest Anchors (`pick-anchor`):** Keep the clean neutral closed-mouth anchor (`eva_canonical_warm_armadio.png` / `anchor_room_grey.png`), or refine cleanly via `pick-anchor`.
+  4. **Phase B (Spokes):** Anchor **every remaining clip** directly to its immutable room hub — never from intermediate Phase B clips. Every spoke stays at generation distance `1`.
 
-### Pillar 3 — 2-Layer Voice Consistency Lock
-1. **Layer 1 (In-Generation Acoustic Conditioning):**
-   - **Local `MiniMax-H3 Ref2VA`:** Pass `--ref-audio resources/eva_voice_master.wav` (extracted directly from `eva_01.mp4`) so both timbre and room acoustics lock natively.
-   - **Seedance 2.5 / Higgsfield:** Attach whole-second `reference_voce.mp4` (`Shot Caller v2`) as `@video1` / Element `@eva-voice-ref`.
-   - **Google Flow:** Enable `@Voice` / `Add Voices` + include identical `Voice Lock:` block (`26-year-old female Northern Italian speaker, crisp warm mid-alto chest voice, natural conversational pitch around 195Hz, steady dynamic consistency, close-mic dry smartphone room acoustics, zero background music`).
-2. **Layer 2 (Zero-Reroll Acoustic Unification via `scripts/elevenlabs_voice_ref.py`):**
-   - If a generated clip has great face, eye contact, and hands, **do NOT burn credits regenerating it** just because vocal tone or room reverb drifted slightly.
-   - Clone `resources/eva_voice_master.wav` once and batch-unify every generated `.mp4` via ElevenLabs Speech-to-Speech (`eleven_multilingual_sts_v2`, preserving exact millisecond syllable & lip-sync timing):
+### Pillar 3 — 4-Stage Broadcast Voice & Lip-Sync Pipeline (`ElevenLabs` + `FFmpeg` + Local `H3`)
+1. **Stage 1 (`~34s` Multi-Inflection Golden Master):** `resources/eva_voice_master.wav` (`34.11s`, `44.1kHz`, `-16 LUFS`, `highpass=80Hz`, `2.5:1` gentle compression) captures `@Eva`'s natural Italian chest timbre, commas, and expressive peaks across 6 clips. Rebuild or create new avatar masters locally with **0 API calls**:
+   ```bash
+   python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --build-golden-sample <clips_dir>
+   ```
+2. **Stage 2 & 3 (Zero-Reroll Single-Pass Concatenated ElevenLabs STS + Locked `voice_settings`):**
+   - Calling TTS/STS per clip resets neural pitch/room conditioning on every request. Instead, `elevenlabs_voice_ref.py --unify-dir` (single-pass concatenated mode by default):
+     1. Pre-cleans every clip's audio (`highpass=80Hz, lowpass=14kHz, -2dB@250Hz, acompressor 2.5:1, -16 LUFS`) to strip room reverb differences between backgrounds;
+     2. Concatenates all clips with `0.65s` digital silence markers and sends **ONE single API call** to `eleven_multilingual_sts_v2` with locked high-consistency settings (`stability=0.78`, `similarity_boost=0.86`, `style=0.0`, `use_speaker_boost=True`, `seed=424242`);
+     3. Slices back at the exact RMS silence valleys, locks each clip's duration within `±1ms` of its video stream (`0.95x–1.05x`), normalizes to `-14.0 LUFS`, and remuxes (`-c:v copy`).
+   - For multi-chunk synthetic TTS lines, pass `--stitch-file lines.txt` to chain `previous_request_ids` (rolling window up to 3 IDs).
+   ```bash
+   python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --check-env
+   python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --clone-voice Eva --save-env
+   python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --unify-dir freebuff-export/11-eva-vibe-coding/eva_clips
+   ```
+3. **Stage 4 (8-Band Spectral EQ + Dynamic Compression + `-14 LUFS` Match — `0` API Credits):**
+   - Even locally without calling ElevenLabs (or right after STS/H3), lock all clips to one golden vocal EQ curve:
      ```bash
-     # 1. Check .env (needs ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)
-     python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --check-env
-
-     # 2. (Optional, one-time) Clone Eva's voice from eva_voice_master.wav and save voice_id to .env
-     python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --clone-voice Eva --save-env
-
-     # 3. Unify a single clip OR an entire folder of MP4 clips
-     python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --s2s-in clip.mp4
-     python .agents/skills/reel-avatar-cloner/scripts/elevenlabs_voice_ref.py --unify-dir freebuff-export/11-eva-vibe-coding/eva_clips
-
-     # 4. Or run end-to-end inside Reel 11 ingestion (ElevenLabs STS + LAB color match + loudnorm)
-     python freebuff-export/11-eva-vibe-coding/ingest_eva_clips.py --dir freebuff-export/11-eva-vibe-coding/eva_clips --unify-elevenlabs
+     python .agents/skills/reel-avatar-cloner/scripts/gflow_batch_ingest.py match-audio clip_02.mp4 --ref golden_04.mp4 --out clip_02_matched.mp4
      ```
+4. **In-Generation Conditioning:**
+   - **Local `MiniMax-H3 Ref2VA`:** Pass `--ref-audio resources/eva_voice_master.wav` (`34s` master) for native timbre lock.
+   - **Seedance 2.5 / Higgsfield:** Attach `reference_voce.mp4` (`Shot Caller v2`) or saved `Character Element`.
+   - **Google Flow:** Enable `@Voice` + include the verbatim `Voice Lock:` block in every prompt.
 
 ### Pillar 4 — Free-Duration Motion Without Looped V2V
 - **When source talking-head cuts are `< 3s`** (like UI-heavy Reels where B-roll cards interrupt the speaker), **never loop short fragments**.

@@ -1,6 +1,6 @@
 {
   "skill": "reel-avatar-cloner",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Scenario tests for reel-avatar-cloner. A run passes only when every item in 'expect' is satisfied.",
   "evals": [
     {
@@ -69,6 +69,15 @@
       "expect": [
         "integrates reverse-any-video (frame-exact cuts, ink-box sizing), motion-doctrine + cut-the-curve (Vector Law, Waterfall Entry §6, 10/65/25 Nudge Curve §7, Rack-Focus, ban on idle wobble), seam-craft (#root opaque stage ground), and oversized-cursor",
         "applies captions-overlay (drop/rail/embed + Overlay Law y=H/2) with VP9 alpha WebM depth layering, remotion-markup SFX (-24..-28 dBFS) + 3-5f J-cuts, and validates hooks/copy with ig-reel (hookscore.py) and ig-human (humanize.py / detect.py)"
+      ]
+    },
+    {
+      "name": "cross-background-face-lock-and-elevenlabs-single-pass-sts",
+      "input": "Eva looks slightly different between the grey wall background and the warm yellow wall with the wooden wardrobe (we prefer the warm-wardrobe version), and her voice shifts slightly from clip to clip.",
+      "expect": [
+        "uses resources/eva_canonical_warm_armadio.png as the single canonical smartphone UGC anchor and runs gflow_batch_ingest.py gen-room-anchor (Stills-First Change-One-Variable relighting) to create Room B plates instead of mixing two conflicting faces in r2v",
+        "extracts closed-mouth, hand-free rest stills via gflow_batch_ingest.py pick-anchor instead of open-toothed smile frames",
+        "unifies multi-clip voice with ElevenLabs Single-Pass Concatenated STS (--unify-dir using stability=0.78, similarity_boost=0.86, style=0.0, use_speaker_boost=True, seed=424242 over pre-cleaned 34s golden master resources/eva_voice_master.wav) and/or local 8-band spectral EQ + -14 LUFS matching (gflow_batch_ingest.py match-audio)"
       ]
     }
   ]

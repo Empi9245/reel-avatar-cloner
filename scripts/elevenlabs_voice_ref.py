@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import array
 import json
 import math
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+import wave
 from pathlib import Path
 
 
@@ -21,6 +24,10 @@ ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1"
 DEFAULT_MODEL_ID = "eleven_v4"
 FALLBACK_MODEL_ID = "eleven_v3"
 DEFAULT_STS_MODEL_ID = "eleven_multilingual_sts_v2"
+DEFAULT_STABILITY = 0.78
+DEFAULT_SIMILARITY = 0.86
+DEFAULT_STYLE = 0.0
+DEFAULT_SEED = 424242
 DEFAULT_VOICE_SAMPLE = Path(__file__).resolve().parent.parent / "resources" / "eva_voice_master.wav"
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 PLACEHOLDER_VALUES = {
@@ -149,31 +156,41 @@ def synthesize_tts(
     model_id: str,
     output_mp3: Path,
     language_code: str | None = None,
-    stability: float | None = None,
-    similarity_boost: float | None = None,
-    style: float | None = None,
+    stability: float | None = DEFAULT_STABILITY,
+    similarity_boost: float | None = DEFAULT_SIMILARITY,
+    style: float | None = DEFAULT_STYLE,
+    use_speaker_boost: bool = True,
+    seed: int | None = DEFAULT_SEED,
+    previous_request_ids: list[str] | None = None,
+    previous_text: str | None = None,
     output_format: str = "mp3_44100_128",
-) -> str:
-    """Call ElevenLabs Text-to-Speech API and save the resulting MP3. Returns actual model_id used."""
+) -> tuple[str, str | None]:
+    """Call ElevenLabs Text-to-Speech API and save the resulting MP3. Returns (model_id, request_id)."""
     body: dict = {
         "text": text,
         "model_id": model_id,
     }
     if language_code:
         body["language_code"] = language_code
-    voice_settings: dict[str, float] = {}
+    if seed is not None:
+        body["seed"] = int(seed)
+    if previous_request_ids:
+        body["previous_request_ids"] = list(previous_request_ids)[-3:]
+    elif previous_text:
+        body["previous_text"] = previous_text[-120:]
+
+    voice_settings: dict[str, float | bool] = {"use_speaker_boost": bool(use_speaker_boost)}
     if stability is not None:
-        voice_settings["stability"] = stability
+        voice_settings["stability"] = float(stability)
     if similarity_boost is not None:
-        voice_settings["similarity_boost"] = similarity_boost
+        voice_settings["similarity_boost"] = float(similarity_boost)
     if style is not None:
-        voice_settings["style"] = style
-    if voice_settings:
-        body["voice_settings"] = voice_settings
+        voice_settings["style"] = float(style)
+    body["voice_settings"] = voice_settings
 
     url = f"{ELEVENLABS_BASE_URL}/text-to-speech/{voice_id}?output_format={output_format}"
 
-    def _post(payload_dict: dict) -> bytes:
+    def _post(payload_dict: dict) -> tuple[bytes, str | None]:
         data = json.dumps(payload_dict).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -186,52 +203,63 @@ def synthesize_tts(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=90) as resp:
-            return resp.read()
+            req_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
+            return resp.read(), req_id
 
     used_model = model_id
+    req_id: str | None = None
     try:
-        audio_bytes = _post(body)
+        audio_bytes, req_id = _post(body)
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="ignore")
+        cleaned = dict(body)
+        if exc.code in (400, 422) and "previous_request_ids" in cleaned and "request" in err_body.lower():
+            cleaned.pop("previous_request_ids", None)
+            if previous_text:
+                cleaned["previous_text"] = previous_text[-120:]
         should_retry_lang = (
             exc.code in (400, 422)
-            and "language_code" in body
+            and "language_code" in cleaned
             and "language" in err_body.lower()
         )
         if should_retry_lang:
-            body_no_lang = {k: v for k, v in body.items() if k != "language_code"}
+            cleaned.pop("language_code", None)
             print(
                 f"[warn] Model {model_id} rejected explicit language_code; retrying with automatic language detection.",
                 file=sys.stderr,
             )
             try:
-                audio_bytes = _post(body_no_lang)
+                audio_bytes, req_id = _post(cleaned)
             except urllib.error.HTTPError as exc2:
                 err_body2 = exc2.read().decode("utf-8", errors="ignore")
                 if exc2.code in (400, 404, 422) and model_id == DEFAULT_MODEL_ID and "model" in err_body2.lower():
-                    body_no_lang["model_id"] = FALLBACK_MODEL_ID
+                    cleaned["model_id"] = FALLBACK_MODEL_ID
+                    cleaned.pop("previous_request_ids", None)
                     used_model = FALLBACK_MODEL_ID
                     print(
                         f"[warn] {DEFAULT_MODEL_ID} unavailable on this account/endpoint; falling back to {FALLBACK_MODEL_ID}.",
                         file=sys.stderr,
                     )
-                    audio_bytes = _post(body_no_lang)
+                    audio_bytes, req_id = _post(cleaned)
                 else:
                     raise RuntimeError(f"ElevenLabs API error {exc2.code}: {err_body2}") from exc2
+        elif exc.code in (400, 422) and cleaned != body:
+            audio_bytes, req_id = _post(cleaned)
         elif exc.code in (400, 404, 422) and model_id == DEFAULT_MODEL_ID and "model" in err_body.lower():
-            body["model_id"] = FALLBACK_MODEL_ID
+            cleaned["model_id"] = FALLBACK_MODEL_ID
+            cleaned.pop("previous_request_ids", None)
             used_model = FALLBACK_MODEL_ID
             print(
                 f"[warn] {DEFAULT_MODEL_ID} unavailable on this account/endpoint; falling back to {FALLBACK_MODEL_ID}.",
                 file=sys.stderr,
             )
-            audio_bytes = _post(body)
+            audio_bytes, req_id = _post(cleaned)
         else:
             raise RuntimeError(f"ElevenLabs API error {exc.code}: {err_body}") from exc
 
     output_mp3.parent.mkdir(parents=True, exist_ok=True)
     output_mp3.write_bytes(audio_bytes)
-    return used_model
+    return used_model, req_id
 
 
 def _build_multipart_form(
@@ -309,9 +337,11 @@ def convert_speech_to_speech(
     source_audio_path: Path,
     output_mp3_path: Path,
     model_id: str = DEFAULT_STS_MODEL_ID,
-    stability: float | None = None,
-    similarity_boost: float | None = None,
-    style: float | None = None,
+    stability: float | None = DEFAULT_STABILITY,
+    similarity_boost: float | None = DEFAULT_SIMILARITY,
+    style: float | None = DEFAULT_STYLE,
+    use_speaker_boost: bool = True,
+    seed: int | None = DEFAULT_SEED,
     remove_background_noise: bool = True,
     output_format: str = "mp3_44100_128",
 ) -> Path:
@@ -320,15 +350,17 @@ def convert_speech_to_speech(
         ("model_id", model_id),
         ("remove_background_noise", "true" if remove_background_noise else "false"),
     ]
-    voice_settings: dict[str, float] = {}
+    if seed is not None:
+        fields.append(("seed", str(int(seed))))
+
+    voice_settings: dict[str, float | bool] = {"use_speaker_boost": bool(use_speaker_boost)}
     if stability is not None:
-        voice_settings["stability"] = stability
+        voice_settings["stability"] = float(stability)
     if similarity_boost is not None:
-        voice_settings["similarity_boost"] = similarity_boost
+        voice_settings["similarity_boost"] = float(similarity_boost)
     if style is not None:
-        voice_settings["style"] = style
-    if voice_settings:
-        fields.append(("voice_settings", json.dumps(voice_settings)))
+        voice_settings["style"] = float(style)
+    fields.append(("voice_settings", json.dumps(voice_settings)))
 
     body, content_type = _build_multipart_form(
         fields=fields,
@@ -346,7 +378,7 @@ def convert_speech_to_speech(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             audio_bytes = resp.read()
     except urllib.error.HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="ignore")
@@ -357,6 +389,269 @@ def convert_speech_to_speech(
     return output_mp3_path
 
 
+def _ffprobe_duration(path: Path) -> float:
+    return get_audio_duration(path) if path.suffix.lower() in {".wav", ".mp3"} else float(
+        probe_media(path)["format"]["duration"]
+    )
+
+
+def _trim_and_clean_speech_wav(src_media: Path, out_wav: Path, *, target_lufs: float = -16.0) -> float:
+    """Extract mono 44.1kHz cleaned speech WAV with leading/trailing silence trimmed & normalized."""
+    ensure_binaries()
+    total_dur = _ffprobe_duration(src_media)
+    sil = subprocess.run(
+        ["ffmpeg", "-i", str(src_media), "-af", "silencedetect=noise=-32dB:d=0.12", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    events = re.findall(r"silence_(start|end):\s*([0-9.]+)", sil.stderr)
+    parsed = [(k, float(ts)) for k, ts in events]
+    s0, s1 = 0.0, total_dur
+    if len(parsed) >= 2 and parsed[0][0] == "start" and parsed[0][1] <= 0.08 and parsed[1][0] == "end":
+        s0 = max(0.0, parsed[1][1] - 0.04)
+    if len(parsed) >= 2 and parsed[-2][0] == "start" and parsed[-1][0] == "end":
+        if abs(parsed[-1][1] - total_dur) <= 0.08 and parsed[-2][1] > s0 + 0.4:
+            s1 = min(total_dur, parsed[-2][1] + 0.06)
+    elif parsed and parsed[-1][0] == "start" and parsed[-1][1] > s0 + 0.4:
+        s1 = min(total_dur, parsed[-1][1] + 0.06)
+    if s1 - s0 < 0.4:
+        s0, s1 = 0.0, total_dur
+
+    af = (
+        f"atrim=start={s0:.4f}:end={s1:.4f},asetpts=PTS-STARTPTS,"
+        "highpass=f=80,lowpass=f=14000,equalizer=f=250:t=q:w=1.2:g=-2.0,"
+        "acompressor=threshold=-18dB:ratio=2.5:attack=5:release=60,"
+        f"loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=7"
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src_media), "-vn", "-af", af, "-ar", "44100", "-ac", "1", "-acodec", "pcm_s16le", str(out_wav)],
+        check=True,
+    )
+    return _ffprobe_duration(out_wav)
+
+
+def build_golden_voice_master(clips_dir: Path, out_wav: Path, *, gap_s: float = 0.35) -> tuple[float, list[str]]:
+    """Build a multi-inflection ~30s golden voice sample from a folder of clean @Eva clips."""
+    ensure_binaries()
+    candidates = sorted(p for p in clips_dir.glob("*.mp4") if "_unified" not in p.stem.lower())
+    if not candidates:
+        candidates = sorted(p for p in clips_dir.glob("*.wav") if "_unified" not in p.stem.lower())
+    if not candidates:
+        raise FileNotFoundError(f"No .mp4 or .wav clips found in {clips_dir}")
+
+    # Prefer golden warm-room delivery order first when available, excluding duplicate TikTok CTA if IG is present
+    names = {p.name: p for p in candidates}
+    ordered: list[Path] = []
+    preferred = ["eva_04.mp4", "eva_03b.mp4", "eva_01.mp4", "eva_05b.mp4", "eva_02.mp4", "eva_06_ig.mp4"]
+    for pref in preferred:
+        if pref in names:
+            ordered.append(names.pop(pref))
+    for k in sorted(names):
+        if "tiktok" in k and any("ig" in p.name for p in ordered):
+            continue
+        ordered.append(names[k])
+
+    used_names: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        sil_wav = tmp_dir / "gap.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", f"{gap_s:.3f}", "-acodec", "pcm_s16le", str(sil_wav)],
+            check=True,
+        )
+        concat_list = tmp_dir / "concat.txt"
+        lines: list[str] = []
+        total_acc = 0.0
+        for idx, clip in enumerate(ordered):
+            part = tmp_dir / f"part_{idx:02d}.wav"
+            dur = _trim_and_clean_speech_wav(clip, part, target_lufs=-16.0)
+            used_names.append(f"{clip.name} ({dur:.2f}s)")
+            lines.append(f"file '{part.as_posix()}'")
+            total_acc += dur
+            if idx < len(ordered) - 1:
+                lines.append(f"file '{sil_wav.as_posix()}'")
+                total_acc += gap_s
+            if total_acc >= 34.0:
+                break
+        concat_list.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        raw_joined = tmp_dir / "raw_joined.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(raw_joined)],
+            check=True,
+        )
+        # 2-pass linear EBU R128 loudnorm (-16 LUFS master for IVC clarity without clipping)
+        p1 = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(raw_joined), "-af", "loudnorm=I=-16:TP=-1.5:LRA=7:print_format=json", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", p1.stderr, re.DOTALL)
+        if m:
+            ln = json.loads(m.group(0))
+            af2 = (
+                "loudnorm=I=-16:TP=-1.5:LRA=7:"
+                f"measured_I={ln['input_i']}:measured_LRA={ln['input_lra']}:"
+                f"measured_TP={ln['input_tp']}:measured_thresh={ln['input_thresh']}:linear=true"
+            )
+        else:
+            af2 = "loudnorm=I=-16:TP=-1.5:LRA=7"
+        out_wav.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_joined), "-af", af2, "-ar", "44100", "-ac", "1", "-acodec", "pcm_s16le", str(out_wav)],
+            check=True,
+        )
+    return _ffprobe_duration(out_wav), used_names
+
+
+def _find_silence_cut_time(samples: array.array, sr: int, nominal_s: float, search_half_s: float = 0.38) -> float:
+    """Find the lowest-RMS center within nominal_s +/- search_half_s using a 40ms sliding window."""
+    n = len(samples)
+    win = max(1, int(0.04 * sr))
+    step = max(1, int(0.005 * sr))
+    lo = max(0, int((nominal_s - search_half_s) * sr))
+    hi = min(n - win - 1, int((nominal_s + search_half_s) * sr))
+    if hi <= lo:
+        return max(0.0, min(n / float(sr), nominal_s))
+    best_pos = int(nominal_s * sr)
+    best_energy = float("inf")
+    for pos in range(lo, hi + 1, step):
+        chunk = samples[pos : pos + win]
+        e = sum(x * x for x in chunk) / float(len(chunk))
+        if e < best_energy:
+            best_energy = e
+            best_pos = pos + win // 2
+    return best_pos / float(sr)
+
+
+def unify_directory_single_pass(
+    *,
+    api_key: str,
+    voice_id: str,
+    mp4s: list[Path],
+    out_folder: Path,
+    in_place: bool,
+    sts_model: str = DEFAULT_STS_MODEL_ID,
+    stability: float | None = DEFAULT_STABILITY,
+    similarity_boost: float | None = DEFAULT_SIMILARITY,
+    style: float | None = DEFAULT_STYLE,
+    use_speaker_boost: bool = True,
+    seed: int | None = DEFAULT_SEED,
+    gap_s: float = 0.65,
+) -> list[tuple[str, Path]]:
+    """Concatenate pre-cleaned clip audio with 0.65s gaps -> ONE single STS pass -> slice & lip-sync lock."""
+    ensure_binaries()
+    out_folder.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        sil_wav = tmp_dir / "gap.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{gap_s:.3f}", "-acodec", "pcm_s16le", str(sil_wav)],
+            check=True,
+        )
+        clip_durs: list[float] = []
+        concat_lines: list[str] = []
+        pre_af = (
+            "highpass=f=80,lowpass=f=14000,equalizer=f=250:t=q:w=1.2:g=-2.0,"
+            "acompressor=threshold=-18dB:ratio=2.5:attack=5:release=60,"
+            "loudnorm=I=-16:TP=-1.5:LRA=7"
+        )
+        for idx, mp4 in enumerate(mp4s):
+            dur = float(probe_media(mp4)["format"]["duration"])
+            clip_durs.append(dur)
+            pwav = tmp_dir / f"in_{idx:02d}.wav"
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp4), "-vn", "-af", f"{pre_af},apad,atrim=0:{dur:.4f}", "-ar", "48000", "-ac", "1", "-acodec", "pcm_s16le", str(pwav)],
+                check=True,
+            )
+            concat_lines.append(f"file '{pwav.as_posix()}'")
+            if idx < len(mp4s) - 1:
+                concat_lines.append(f"file '{sil_wav.as_posix()}'")
+
+        concat_txt = tmp_dir / "master_concat.txt"
+        concat_txt.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+        master_in = tmp_dir / "master_in.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_txt), "-c", "copy", str(master_in)],
+            check=True,
+        )
+        t_in = get_audio_duration(master_in)
+
+        master_sts_mp3 = tmp_dir / "master_sts.mp3"
+        convert_speech_to_speech(
+            api_key=api_key,
+            voice_id=voice_id,
+            source_audio_path=master_in,
+            output_mp3_path=master_sts_mp3,
+            model_id=sts_model,
+            stability=stability,
+            similarity_boost=similarity_boost,
+            style=style,
+            use_speaker_boost=use_speaker_boost,
+            seed=seed,
+        )
+
+        master_sts_wav = tmp_dir / "master_sts.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(master_sts_mp3), "-ar", "48000", "-ac", "1", "-acodec", "pcm_s16le", str(master_sts_wav)],
+            check=True,
+        )
+        with wave.open(str(master_sts_wav), "rb") as wf:
+            sr = wf.getframerate()
+            samples = array.array("h")
+            samples.frombytes(wf.readframes(wf.getnframes()))
+        t_sts = len(samples) / float(sr)
+        scale = t_sts / max(0.1, t_in)
+
+        # Compute split midpoints cleanly inside every 0.65s separator gap
+        cuts_s = [0.0]
+        cum = 0.0
+        for idx, dur in enumerate(clip_durs[:-1]):
+            gap_mid_in = cum + dur + gap_s * 0.5
+            cuts_s.append(_find_silence_cut_time(samples, sr, gap_mid_in * scale, search_half_s=gap_s * 0.48))
+            cum += dur + gap_s
+        cuts_s.append(t_sts)
+
+        results: list[tuple[str, Path]] = []
+        half_gap_trim = (gap_s * 0.5 * scale) * 0.72
+        for idx, (mp4, target_dur) in enumerate(zip(mp4s, clip_durs)):
+            seg_start = cuts_s[idx] + (half_gap_trim if idx > 0 else 0.0)
+            seg_end = cuts_s[idx + 1] - (half_gap_trim if idx < len(clip_durs) - 1 else 0.0)
+            seg_dur = max(0.2, seg_end - seg_start)
+            rate = seg_dur / max(0.2, target_dur)
+            tempo_chain = f"atempo={max(0.95, min(1.05, rate)):.5f}," if 0.95 <= rate <= 1.05 and abs(rate - 1.0) > 0.002 else ""
+            af_seg = (
+                f"atrim=start={seg_start:.4f}:end={seg_end:.4f},asetpts=PTS-STARTPTS,"
+                f"{tempo_chain}"
+                "loudnorm=I=-14.0:TP=-1.5:LRA=7,"
+                f"apad,atrim=0:{target_dur:.4f},asetpts=PTS-STARTPTS"
+            )
+            dst = mp4 if in_place else (out_folder / mp4.name)
+            tmp_out = tmp_dir / f"mux_{idx:02d}{dst.suffix}"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", str(mp4),
+                    "-i", str(master_sts_wav),
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-af", af_seg,
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-ar", "48000",
+                    "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    str(tmp_out),
+                ],
+                check=True,
+            )
+            shutil.move(str(tmp_out), str(dst))
+            results.append((mp4.name, dst))
+    return results
+
+
 def unify_media_voice(
     *,
     api_key: str,
@@ -364,9 +659,11 @@ def unify_media_voice(
     src_path: Path,
     dst_path: Path,
     sts_model: str = DEFAULT_STS_MODEL_ID,
-    stability: float | None = None,
-    similarity_boost: float | None = None,
-    style: float | None = None,
+    stability: float | None = DEFAULT_STABILITY,
+    similarity_boost: float | None = DEFAULT_SIMILARITY,
+    style: float | None = DEFAULT_STYLE,
+    use_speaker_boost: bool = True,
+    seed: int | None = DEFAULT_SEED,
 ) -> Path:
     """Replace vocal timbre on an audio file or MP4 video via Speech-to-Speech, keeping video & timing 1:1."""
     ensure_binaries()
@@ -381,14 +678,26 @@ def unify_media_voice(
             stability=stability,
             similarity_boost=similarity_boost,
             style=style,
+            use_speaker_boost=use_speaker_boost,
+            seed=seed,
         )
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         raw_wav = tmp_dir / "src_audio.wav"
         sts_mp3 = tmp_dir / "sts_unified.mp3"
+        target_dur = float(probe_media(src_path)["format"]["duration"])
+        pre_af = (
+            "highpass=f=80,lowpass=f=14000,equalizer=f=250:t=q:w=1.2:g=-2.0,"
+            "acompressor=threshold=-18dB:ratio=2.5:attack=5:release=60,"
+            "loudnorm=I=-16:TP=-1.5:LRA=7"
+        )
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1", str(raw_wav)],
+            [
+                "ffmpeg", "-y", "-i", str(src_path), "-vn",
+                "-af", pre_af,
+                "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1", str(raw_wav),
+            ],
             check=True,
             capture_output=True,
         )
@@ -401,6 +710,8 @@ def unify_media_voice(
             stability=stability,
             similarity_boost=similarity_boost,
             style=style,
+            use_speaker_boost=use_speaker_boost,
+            seed=seed,
         )
         tmp_out = tmp_dir / f"muxed{dst_path.suffix}"
         subprocess.run(
@@ -410,8 +721,10 @@ def unify_media_voice(
                 "-i", str(sts_mp3),
                 "-map", "0:v:0",
                 "-map", "1:a:0",
+                "-af", f"loudnorm=I=-14.0:TP=-1.5:LRA=7,apad,atrim=0:{target_dur:.4f},asetpts=PTS-STARTPTS",
                 "-c:v", "copy",
                 "-c:a", "aac",
+                "-ar", "48000",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(tmp_out),
@@ -524,9 +837,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--language",
         help="Optional ISO 639-1 language code for cross-language hint (e.g. 'it', 'en', 'es').",
     )
-    parser.add_argument("--stability", type=float, help="Optional ElevenLabs stability (0.0-1.0).")
-    parser.add_argument("--similarity", type=float, help="Optional ElevenLabs similarity_boost (0.0-1.0).")
-    parser.add_argument("--style", type=float, help="Optional ElevenLabs style exaggeration (0.0-1.0).")
+    parser.add_argument(
+        "--stability",
+        type=float,
+        default=DEFAULT_STABILITY,
+        help=f"ElevenLabs voice stability (0.0-1.0, default: {DEFAULT_STABILITY} for cross-clip lock).",
+    )
+    parser.add_argument(
+        "--similarity",
+        type=float,
+        default=DEFAULT_SIMILARITY,
+        help=f"ElevenLabs similarity_boost (0.0-1.0, default: {DEFAULT_SIMILARITY}).",
+    )
+    parser.add_argument(
+        "--style",
+        type=float,
+        default=DEFAULT_STYLE,
+        help=f"ElevenLabs style exaggeration (0.0-1.0, default: {DEFAULT_STYLE} to avoid pitch drift).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"Deterministic seed for cross-clip reproducibility (default: {DEFAULT_SEED}).",
+    )
+    parser.add_argument(
+        "--no-speaker-boost",
+        action="store_true",
+        help="Disable ElevenLabs use_speaker_boost (enabled by default for voice lock).",
+    )
+    parser.add_argument(
+        "--stitch-file",
+        help="Text file (one spoken chunk per line) to synthesize sequentially with previous_request_ids request stitching.",
+    )
     parser.add_argument(
         "--min-seconds",
         type=int,
@@ -535,6 +878,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--list-voices", action="store_true", help="List available voices from ElevenLabs and exit.")
     parser.add_argument("--check-env", action="store_true", help="Check .env credentials and exit.")
+    parser.add_argument(
+        "--build-golden-sample",
+        metavar="CLIPS_DIR",
+        help="Build ~30s multi-inflection golden voice master WAV from clean @Eva MP4s (no API key needed).",
+    )
+    parser.add_argument(
+        "--golden-out",
+        default=str(DEFAULT_VOICE_SAMPLE),
+        help=f"Output WAV path for --build-golden-sample (default: {DEFAULT_VOICE_SAMPLE}).",
+    )
     parser.add_argument(
         "--clone-voice",
         metavar="NAME",
@@ -558,7 +911,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--s2s-out", help="Output path for --s2s-in (defaults to <stem>_unified<ext>).")
     parser.add_argument(
         "--unify-dir",
-        help="Batch-unify all MP4 clips in a folder onto ELEVENLABS_VOICE_ID via Speech-to-Speech.",
+        help="Batch-unify all MP4 clips in a folder onto ELEVENLABS_VOICE_ID (single-pass concatenated STS by default).",
+    )
+    parser.add_argument(
+        "--per-clip-sts",
+        action="store_true",
+        help="Call Speech-to-Speech separately per clip instead of single-pass concatenated STS.",
     )
     parser.add_argument("--unify-out-dir", help="Output folder for --unify-dir (default: <DIR>/unified).")
     parser.add_argument("--in-place", action="store_true", help="Overwrite MP4s in place during --unify-dir.")
@@ -597,6 +955,13 @@ def main() -> int:
             print(f"{v.get('voice_id')} | {v.get('name')} | {labels}")
         return 0
 
+    if args.build_golden_sample:
+        clips_dir = Path(args.build_golden_sample).expanduser().resolve()
+        out_wav = Path(args.golden_out).expanduser().resolve()
+        dur_s, used = build_golden_voice_master(clips_dir, out_wav)
+        print(f"[golden] Built {out_wav} ({dur_s:.2f}s, -16 LUFS) from {len(used)} clips: {', '.join(used)}")
+        return 0
+
     if args.clone_voice:
         if not api_key:
             print("MISSING CREDENTIALS: ELEVENLABS_API_KEY is required for --clone-voice.", file=sys.stderr)
@@ -617,6 +982,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+        speaker_boost = not args.no_speaker_boost
         if args.s2s_in:
             src = Path(args.s2s_in).expanduser().resolve()
             dst = (
@@ -633,6 +999,8 @@ def main() -> int:
                 stability=args.stability,
                 similarity_boost=args.similarity,
                 style=args.style,
+                use_speaker_boost=speaker_boost,
+                seed=args.seed,
             )
             print(f"[s2s] Unified voice -> {dst}")
             return 0
@@ -644,6 +1012,23 @@ def main() -> int:
             return 1
         out_folder = src_dir if args.in_place else (Path(args.unify_out_dir).expanduser().resolve() if args.unify_out_dir else (src_dir / "unified"))
         out_folder.mkdir(parents=True, exist_ok=True)
+        if not args.per_clip_sts:
+            res_list = unify_directory_single_pass(
+                api_key=api_key,
+                voice_id=voice_id,
+                mp4s=mp4s,
+                out_folder=out_folder,
+                in_place=args.in_place,
+                sts_model=args.sts_model,
+                stability=args.stability,
+                similarity_boost=args.similarity,
+                style=args.style,
+                use_speaker_boost=speaker_boost,
+                seed=args.seed,
+            )
+            for name, dst in res_list:
+                print(f"[unify single-pass] {name} -> {dst}")
+            return 0
         for mp4 in mp4s:
             dst = mp4 if args.in_place else (out_folder / mp4.name)
             unify_media_voice(
@@ -655,8 +1040,10 @@ def main() -> int:
                 stability=args.stability,
                 similarity_boost=args.similarity,
                 style=args.style,
+                use_speaker_boost=speaker_boost,
+                seed=args.seed,
             )
-            print(f"[unify] {mp4.name} -> {dst}")
+            print(f"[unify per-clip] {mp4.name} -> {dst}")
         return 0
 
     out_dir = Path(args.out_dir)
@@ -686,26 +1073,70 @@ def main() -> int:
             )
             return 2
 
-        text = args.text
-        if not text and args.text_file:
-            text = Path(args.text_file).read_text(encoding="utf-8").strip()
-        if not text:
-            print("Provide --text or --text-file (or --audio-in for an existing MP3).", file=sys.stderr)
-            return 1
+        speaker_boost = not args.no_speaker_boost
+        if args.stitch_file:
+            ensure_binaries()
+            chunk_lines = [ln.strip() for ln in Path(args.stitch_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if not chunk_lines:
+                print(f"No lines found in --stitch-file: {args.stitch_file}", file=sys.stderr)
+                return 1
+            out_dir.mkdir(parents=True, exist_ok=True)
+            prev_ids: list[str] = []
+            prev_txt: str | None = None
+            chunk_mp3s: list[Path] = []
+            for idx, chunk in enumerate(chunk_lines):
+                chunk_mp3 = out_dir / f"stitch_{idx:02d}.mp3"
+                used_model, rid = synthesize_tts(
+                    api_key=api_key,
+                    voice_id=voice_id,
+                    text=chunk,
+                    model_id=model_id,
+                    output_mp3=chunk_mp3,
+                    language_code=args.language,
+                    stability=args.stability,
+                    similarity_boost=args.similarity,
+                    style=args.style,
+                    use_speaker_boost=speaker_boost,
+                    seed=args.seed,
+                    previous_request_ids=prev_ids,
+                    previous_text=prev_txt,
+                )
+                chunk_mp3s.append(chunk_mp3)
+                if rid:
+                    prev_ids.append(rid)
+                prev_txt = chunk
+                print(f"[stitch {idx:02d}] model={used_model} rid={rid or 'none'} -> {chunk_mp3}")
+            concat_txt = out_dir / "_stitch_concat.txt"
+            concat_txt.write_text("\n".join(f"file '{p.resolve().as_posix()}'" for p in chunk_mp3s) + "\n", encoding="utf-8")
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_txt), "-c:a", "libmp3lame", "-b:a", "192k", str(out_mp3)],
+                check=True,
+            )
+            concat_txt.unlink(missing_ok=True)
+            audio_src = out_mp3
+        else:
+            text = args.text
+            if not text and args.text_file:
+                text = Path(args.text_file).read_text(encoding="utf-8").strip()
+            if not text:
+                print("Provide --text, --text-file, --stitch-file (or --audio-in for an existing MP3).", file=sys.stderr)
+                return 1
 
-        used_model = synthesize_tts(
-            api_key=api_key,
-            voice_id=voice_id,
-            text=text,
-            model_id=model_id,
-            output_mp3=out_mp3,
-            language_code=args.language,
-            stability=args.stability,
-            similarity_boost=args.similarity,
-            style=args.style,
-        )
-        print(f"[tts] Generated {out_mp3} using model={used_model}, voice_id={voice_id}")
-        audio_src = out_mp3
+            used_model, rid = synthesize_tts(
+                api_key=api_key,
+                voice_id=voice_id,
+                text=text,
+                model_id=model_id,
+                output_mp3=out_mp3,
+                language_code=args.language,
+                stability=args.stability,
+                similarity_boost=args.similarity,
+                style=args.style,
+                use_speaker_boost=speaker_boost,
+                seed=args.seed,
+            )
+            print(f"[tts] Generated {out_mp3} using model={used_model}, voice_id={voice_id}, request_id={rid or 'none'}")
+            audio_src = out_mp3
 
     raw_dur, target_s, verified_dur = export_black_video_whole_seconds(
         audio_src,

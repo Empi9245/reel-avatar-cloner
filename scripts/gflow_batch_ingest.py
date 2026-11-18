@@ -1,10 +1,13 @@
 """Project-agnostic Google Flow & @Eva post-production utility for reel-avatar-cloner.
 
 Subcommands:
-  check       Verify gflow-cli auth session and Google Flow credits balance ($0 cost)
-  trim        Trim leading/trailing silence (sample-accurate A/V) or concat split takes
-  grade       Normalize LAB luminance/white balance & midtone gamma=1.10 (fixes "accesi" Flow outputs at $0 cost)
-  popout-pip  Render 1036x850 true-alpha VP9 WebM (yuva420p) 3D pop-out PIP clip for Remotion <OffthreadVideo transparent />
+  check            Verify gflow-cli auth session and Google Flow credits balance ($0 cost)
+  trim             Trim leading/trailing silence (sample-accurate A/V) or concat split takes
+  grade            Normalize LAB luminance/white balance & midtone gamma=1.10 (fixes "accesi" Flow outputs at $0 cost)
+  popout-pip       Render 1036x850 true-alpha VP9 WebM (yuva420p) 3D pop-out PIP clip for Remotion <OffthreadVideo transparent />
+  gen-room-anchor  Generate a face-locked Room B reference PNG via i2i relighting (Change-One-Variable rule)
+  pick-anchor      Extract the sharpest relaxed-mouth, hand-free master anchor PNG from a generated video clip
+  match-audio      Match clip vocal spectrum (highpass + 8-band EQ + acompressor + 2-pass -14 LUFS) to golden voice
 """
 from __future__ import annotations
 
@@ -16,10 +19,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import wave
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+DEFAULT_CANONICAL_ANCHOR = Path(__file__).resolve().parent.parent / "resources" / "eva_canonical_warm_armadio.png"
 
 
 def find_gflow_bin() -> str:
@@ -544,6 +551,288 @@ def export_popout_webm(
     return written
 
 
+def _detect_portrait_face(bgr: np.ndarray) -> tuple[int, int, int, int]:
+    """Locate primary central face box (x, y, w, h) via YCrCb skin segmentation (headless OpenCV safe)."""
+    h, w = bgr.shape[:2]
+    ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+    y0, y1 = int(0.14 * h), int(0.66 * h)
+    x0, x1 = int(0.20 * w), int(0.80 * w)
+    roi = ycrcb[y0:y1, x0:x1]
+    skin = (
+        (roi[:, :, 0] > 55)
+        & (roi[:, :, 1] >= 134)
+        & (roi[:, :, 1] <= 174)
+        & (roi[:, :, 2] >= 78)
+        & (roi[:, :, 2] <= 128)
+    ).astype(np.uint8)
+    skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n_lbl, _, stats, centroids = cv2.connectedComponentsWithStats(skin, connectivity=8)
+    best_idx = -1
+    best_area = 0
+    for lbl in range(1, n_lbl):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        cx_rel = float(centroids[lbl][0]) / max(1.0, float(x1 - x0))
+        if area > best_area and 0.15 <= cx_rel <= 0.85:
+            best_area = area
+            best_idx = lbl
+    if best_idx > 0 and best_area > int(0.015 * h * w):
+        bx = x0 + int(stats[best_idx, cv2.CC_STAT_LEFT])
+        by = y0 + int(stats[best_idx, cv2.CC_STAT_TOP])
+        bw = int(stats[best_idx, cv2.CC_STAT_WIDTH])
+        bh = min(int(stats[best_idx, cv2.CC_STAT_HEIGHT]), int(bw * 1.25))
+        return bx, by, bw, max(bw, bh)
+    return int(w * 0.28), int(h * 0.24), int(w * 0.44), int(h * 0.28)
+
+
+ROOM_PRESET_DESCRIPTIONS = {
+    "grey-plaster": (
+        "Clean matte pale-grey interior plaster bedroom wall with a vertical wall corner seam on the camera-right "
+        "third, soft cool overcast natural indoor window daylight coming from camera-left onto her face and hair, "
+        "removing the yellow wall and wooden wardrobe completely"
+    ),
+    "warm-cream": (
+        "Soft neutral-warm plastered apartment wall with diffused indoor daylight and subtle corner shadow falloff, "
+        "clean minimalist room background with no furniture clutter"
+    ),
+    "modern-office": (
+        "Minimalist neutral-toned creative studio wall in soft natural indoor daylight with subtle shallow depth blur, "
+        "no bright neon lights, keeping authentic smartphone UGC lighting"
+    ),
+}
+
+
+def build_room_anchor_prompt(room_preset: str = "grey-plaster", room_desc: str | None = None) -> str:
+    """Build a Stills-First Change-One-Variable + Relight prompt keeping exact character identity."""
+    env = (room_desc or ROOM_PRESET_DESCRIPTIONS[room_preset]).strip()
+    return (
+        "Exact same person from the attached reference photo (100% identical facial structure, nose, eyebrows, "
+        "chin, ear shape, light skin freckles, small cheek beauty mark under left eye, relaxed closed-mouth serene "
+        "expression, high messy dark-brown bun hairstyle with loose wispy face-framing curls, round tortoiseshell "
+        "eyeglasses, matte charcoal-black crew-neck cotton t-shirt, and delicate thin gold necklace). "
+        "Identical 9:16 arm's-length smartphone front-camera chest-up framing, focal length (~24mm), and camera height "
+        "with 15% clean wall headroom above her hair bun. "
+        f"Change ONLY the room background and ambient room light to: {env}. "
+        "Natural soft environmental daylight wraps subtly around her hair strands, tortoiseshell frame, and shoulders "
+        "so the portrait belongs naturally to the new room with authentic smartphone grain, zero studio gloss, zero "
+        "airbrushing, zero jewelry changes, zero extra props or text."
+    )
+
+
+def gen_room_anchor(
+    src_path: str,
+    out_path: str,
+    *,
+    room_preset: str = "grey-plaster",
+    room_desc: str | None = None,
+    model: str = "nano2",
+    project: str | None = None,
+    dry_run: bool = False,
+) -> list[str]:
+    """Generate a face-locked Room B still anchor via gflow image i2i using Stills-First relighting."""
+    src = Path(src_path).expanduser().resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"Canonical anchor image not found: {src}")
+    out = Path(out_path).expanduser().resolve()
+    prompt = build_room_anchor_prompt(room_preset=room_preset, room_desc=room_desc)
+    gflow = find_gflow_bin()
+    cmd = [
+        gflow,
+        "image",
+        "i2i",
+        prompt,
+        "--ref",
+        str(src),
+        "--model",
+        model,
+        "--aspect",
+        "9:16",
+        "-n",
+        "1",
+        "--out-file",
+        str(out),
+    ]
+    if project:
+        cmd += ["--project", project]
+    if dry_run:
+        return cmd
+    out.parent.mkdir(parents=True, exist_ok=True)
+    res = subprocess.run(cmd)
+    if res.returncode != 0:
+        raise RuntimeError(f"gflow image i2i failed with exit code {res.returncode}")
+    return cmd
+
+
+def pick_neutral_anchor(
+    video_path: str,
+    out_png: str,
+    *,
+    max_samples: int = 45,
+) -> tuple[float, float]:
+    """Scan generated MP4 and extract the sharpest relaxed closed-mouth, hand-free anchor PNG."""
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if total <= 0:
+        cap.release()
+        raise RuntimeError(f"Could not read frames from {video_path}")
+
+    lo = 0
+    hi = max(1, total - 1)
+    indices = np.unique(np.linspace(lo, hi, min(max(max_samples, 60), total), dtype=int))
+
+    best_score = -1e9
+    best_frame: np.ndarray | None = None
+    best_ts = 0.0
+
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            continue
+        h, w = fr.shape[:2]
+        gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        fx, fy, fw, fh = _detect_portrait_face(fr)
+
+        face_gray = gray[fy : fy + fh, fx : fx + fw]
+        sharpness = float(cv2.Laplacian(face_gray, cv2.CV_64F).var()) if face_gray.size else 0.0
+
+        # Mouth closed / relaxed score: penalize visible bright teeth and dark open mouth interior
+        m_y0, m_y1 = fy + int(0.65 * fh), min(h, fy + int(0.84 * fh))
+        m_x0, m_x1 = fx + int(0.32 * fw), min(w, fx + int(0.68 * fw))
+        mouth = gray[m_y0:m_y1, m_x0:m_x1]
+        if mouth.size:
+            bright_teeth = float(np.mean(mouth > 168))
+            dark_cavity = float(np.mean(mouth < 65))
+            teeth_penalty = bright_teeth * 600.0 + dark_cavity * 450.0 + float(np.std(mouth)) * 1.8
+        else:
+            teeth_penalty = 80.0
+
+        # Lower chest ROI check for hands/arms blocking t-shirt & necklace
+        torso = fr[int(0.72 * h) :, int(0.15 * w) : int(0.85 * w)]
+        ycrcb = cv2.cvtColor(torso, cv2.COLOR_BGR2YCrCb)
+        skin_mask = (ycrcb[:, :, 1] > 135) & (ycrcb[:, :, 1] < 173) & (ycrcb[:, :, 2] > 80) & (ycrcb[:, :, 2] < 126)
+        hand_penalty = float(np.mean(skin_mask) * 320.0)
+
+        score = sharpness * 0.35 - teeth_penalty - hand_penalty
+        if score > best_score:
+            best_score = score
+            best_frame = fr
+            best_ts = float(idx) / float(fps)
+
+    cap.release()
+    if best_frame is None:
+        raise RuntimeError(f"Failed to pick anchor frame from {video_path}")
+    Path(out_png).parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(out_png, best_frame)
+    return best_ts, best_score
+
+
+def _extract_mono_wav_48k(media_path: str, out_wav: str) -> None:
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", media_path, "-vn", "-ac", "1", "-ar", "48000", "-acodec", "pcm_s16le", out_wav],
+        check=True,
+    )
+
+
+def _voiced_band_energies_db(wav_path: str, centers_hz: list[float]) -> np.ndarray:
+    """Measure average vocal energy across 8 frequency bands on voiced frames (stdlib wave + numpy)."""
+    with wave.open(wav_path, "rb") as wf:
+        sr = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    n_fft = 2048
+    hop = 1024
+    if len(samples) < n_fft:
+        return np.zeros(len(centers_hz), dtype=np.float32)
+    win = np.hanning(n_fft).astype(np.float32)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    frames = [samples[i : i + n_fft] for i in range(0, len(samples) - n_fft + 1, hop)]
+    rms = np.array([math.sqrt(float(np.mean(fr * fr)) + 1e-12) for fr in frames])
+    thresh = max(1e-4, float(np.max(rms)) * 0.08)
+    mags = [np.abs(np.fft.rfft(fr * win)) for fr, r in zip(frames, rms) if r >= thresh]
+    if not mags:
+        mags = [np.abs(np.fft.rfft(frames[0] * win))]
+    mean_mag = np.mean(mags, axis=0) + 1e-8
+
+    band_db: list[float] = []
+    for fc in centers_hz:
+        lo = fc / 1.38
+        hi = fc * 1.38
+        sel = (freqs >= lo) & (freqs <= hi)
+        energy = float(np.mean(mean_mag[sel])) if np.any(sel) else 1e-8
+        band_db.append(20.0 * math.log10(max(1e-8, energy)))
+    return np.array(band_db, dtype=np.float32)
+
+
+def match_audio_spectrum(
+    src_media: str,
+    ref_media: str,
+    out_media: str,
+    *,
+    target_lufs: float = -14.0,
+) -> dict[str, float]:
+    """Match vocal spectral envelope (8-band EQ) + EBU R128 loudness of src_media to ref_media."""
+    if not has_audio(src_media):
+        raise RuntimeError(f"Input file has no audio stream: {src_media}")
+    if not has_audio(ref_media):
+        raise RuntimeError(f"Reference file has no audio stream: {ref_media}")
+
+    centers = [120.0, 240.0, 480.0, 960.0, 1920.0, 3200.0, 5200.0, 8200.0]
+    with tempfile.TemporaryDirectory() as tmp:
+        src_wav = os.path.join(tmp, "src.wav")
+        ref_wav = os.path.join(tmp, "ref.wav")
+        _extract_mono_wav_48k(src_media, src_wav)
+        _extract_mono_wav_48k(ref_media, ref_wav)
+        src_db = _voiced_band_energies_db(src_wav, centers)
+        ref_db = _voiced_band_energies_db(ref_wav, centers)
+
+    src_db = src_db - float(np.mean(src_db))
+    ref_db = ref_db - float(np.mean(ref_db))
+    gains = np.clip((ref_db - src_db) * 0.72, -4.5, 4.5)
+
+    eq_parts = ["highpass=f=80"]
+    for fc, g in zip(centers, gains):
+        eq_parts.append(f"equalizer=f={int(fc)}:t=q:w=1.2:g={float(g):.2f}")
+    eq_parts.append("acompressor=threshold=-18dB:ratio=2.5:attack=5:release=60")
+    eq_chain = ",".join(eq_parts)
+
+    # 2-pass loudnorm measurement after spectral EQ
+    probe_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        src_media,
+        "-af",
+        f"{eq_chain},loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=7:print_format=json",
+        "-f",
+        "null",
+        "-",
+    ]
+    probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+    m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", probe_res.stderr, re.DOTALL)
+    if m:
+        ln = json.loads(m.group(0))
+        norm_filter = (
+            f"{eq_chain},"
+            f"loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=7:"
+            f"measured_I={ln['input_i']}:measured_LRA={ln['input_lra']}:"
+            f"measured_TP={ln['input_tp']}:measured_thresh={ln['input_thresh']}:linear=true"
+        )
+    else:
+        norm_filter = f"{eq_chain},loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=7"
+
+    Path(out_media).parent.mkdir(parents=True, exist_ok=True)
+    is_video = Path(src_media).suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_media, "-af", norm_filter]
+    if is_video and Path(out_media).suffix.lower() in {".mp4", ".mov", ".mkv"}:
+        cmd += ["-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", out_media]
+    else:
+        cmd += ["-ar", "48000", out_media]
+    subprocess.run(cmd, check=True)
+    return {str(int(fc)): round(float(g), 2) for fc, g in zip(centers, gains)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Google Flow & @Eva post-production toolkit")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -575,6 +864,34 @@ def main() -> int:
     p_pip.add_argument("--duration", type=float, default=None, help="Duration in seconds")
     p_pip.add_argument("--y-offset", type=int, default=42, help="Vertical crop offset inside 720x1280")
 
+    p_room = sub.add_parser(
+        "gen-room-anchor",
+        help="Generate face-locked Room B reference PNG via i2i relighting (Stills-First rule)",
+    )
+    p_room.add_argument(
+        "input",
+        nargs="?",
+        default=str(DEFAULT_CANONICAL_ANCHOR),
+        help="Canonical avatar portrait PNG (defaults to resources/eva_canonical_warm_armadio.png)",
+    )
+    p_room.add_argument("--out", required=True, help="Output room-locked PNG anchor path")
+    p_room.add_argument("--room-preset", choices=["grey-plaster", "warm-cream", "modern-office"], default="grey-plaster")
+    p_room.add_argument("--room-desc", default=None, help="Custom natural room background & lighting description")
+    p_room.add_argument("--model", choices=["nano2", "nano21", "nano-pro", "nano2-lite"], default="nano2")
+    p_room.add_argument("--project", default=None, help="Optional Flow project UUID")
+    p_room.add_argument("--dry-run", action="store_true", help="Print the exact i2i command without executing")
+
+    p_pick = sub.add_parser("pick-anchor", help="Extract sharpest relaxed closed-mouth, hand-free anchor PNG from video")
+    p_pick.add_argument("input", help="Input MP4 clip")
+    p_pick.add_argument("--out", required=True, help="Output PNG path")
+    p_pick.add_argument("--samples", type=int, default=45)
+
+    p_aud = sub.add_parser("match-audio", help="Match 8-band vocal EQ & EBU R128 loudness to golden voice reference")
+    p_aud.add_argument("input", help="Input MP4/WAV/MP3 clip")
+    p_aud.add_argument("--ref", required=True, help="Golden reference MP4/WAV/MP3 file")
+    p_aud.add_argument("--out", required=True, help="Output audio-matched MP4/WAV path")
+    p_aud.add_argument("--target-lufs", type=float, default=-14.0)
+
     args = parser.parse_args()
 
     if args.cmd == "check":
@@ -604,6 +921,32 @@ def main() -> int:
             args.input, args.out, start_s=args.start, dur_s=args.duration, y_offset=args.y_offset
         )
         print(f"Exported VP9 alpha 3D pop-out PIP -> {args.out} ({n} frames)")
+        return 0
+
+    if args.cmd == "gen-room-anchor":
+        cmd = gen_room_anchor(
+            args.input,
+            args.out,
+            room_preset=args.room_preset,
+            room_desc=args.room_desc,
+            model=args.model,
+            project=args.project,
+            dry_run=args.dry_run,
+        )
+        if args.dry_run:
+            print("[dry-run]", " ".join(f'"{c[:72]}..."' if len(c) > 85 else (f'"{c}"' if " " in c else c) for c in cmd))
+        else:
+            print(f"Generated face-locked room anchor -> {args.out}")
+        return 0
+
+    if args.cmd == "pick-anchor":
+        ts, sc = pick_neutral_anchor(args.input, args.out, max_samples=args.samples)
+        print(f"Picked neutral anchor @ {ts:.2f}s (score={sc:.1f}) -> {args.out}")
+        return 0
+
+    if args.cmd == "match-audio":
+        gains = match_audio_spectrum(args.input, args.ref, args.out, target_lufs=args.target_lufs)
+        print(f"Matched vocal EQ/LUFS ({args.target_lufs:.1f} LUFS) -> {args.out} | band_db={gains}")
         return 0
 
     return 2

@@ -30,14 +30,14 @@ Before generating any voice clip, lock a final shot-by-shot Italian script + UI 
      - Spoken closing line (`omni-1.2-flash` safe wording): `"Seguici sul profilo e scrivi promo per provare subito questo agente gratuito."`
      - On-screen cards: `CommentBoxCard` (`title="Scrivi in DM"`, `keyword="PROMO"`), captions `SEGUICI SUL PROFILO / E SCRIVI "PROMO" / IN DM PER PROVARE`, and `OutroBlackCard` (`leadText="seguici e scrivici in DM"`, `keyword="PROMO"`).
 
-### Step C — Credit-Minimizing Single-Model Generation (`gflow-cli`)
-1. **Strict Single-Model Rule:** Always generate ALL spoken clips for one video using the **same model and resolution** (`--model omni-1.2-flash --resolution 360p`, **~5 Flow credits per 5–7s clip**). Never auto-fallback mid-video to another model (`veo-fast`), which shifts skin texture, optics, and vocal character.
+### Step C — Single-Face Multi-Room Relighting & Credit-Minimizing Generation (`gflow-cli`)
+1. **Strict Single-Model & Single-Face Anchor Rule:** Generate ALL spoken clips for one video using the **same model and resolution** (`--model omni-1.2-flash --resolution 360p`, **~5 Flow credits/clip**, never switch to `veo-fast` mid-reel). Start every room from `@Eva`'s preferred canonical smartphone UGC anchor ([resources/eva_canonical_warm_armadio.png](../resources/eva_canonical_warm_armadio.png)); for a secondary background, run **`gen-room-anchor`** (Joey `@noisygroup` *Stills-First Change-One-Variable & Relight* via `i2i`) instead of blending two conflicting face sheets in `r2v`.
 2. **Pre-Flight Check (`$0` credits):**
    ```powershell
    python .agents/skills/reel-avatar-cloner/scripts/gflow_batch_ingest.py check
    ```
-3. **2-Phase Star Topology + User Checkpoint:** Generate Phase A (1 master per room) first -> verify eyes/hands/speech via `read_file` -> extract clean empty/neutral room stills -> generate Phase B anchored to `(eva_con_tshirt.png + master_room.png)` -> pause for user check on raw clips if requested before final closing CTA clips.
-4. **Never Spend Credits Fixing Brightness:** If raw `r2v` clips look slightly bright (*"accesi"* from blending `@Eva` with a light grey wall reference), correct exposure and contrast in post with `gflow_batch_ingest.py grade` (`gamma = 1.10`) at **0 credits**.
+3. **2-Phase Star Topology + User Checkpoint:** Generate Phase A (1 master per room) first -> verify eyes/hands/speech via `read_file` -> extract clean closed-mouth rest stills via `gflow_batch_ingest.py pick-anchor` when needed -> generate Phase B anchored cleanly to its room hub -> pause for user check on raw clips if requested before final CTA clips.
+4. **Never Spend Credits Fixing Brightness:** If raw `r2v` clips look slightly bright (*"accesi"*), correct exposure and contrast in post with `gflow_batch_ingest.py grade` (`gamma = 1.10`) at **0 credits**.
 
 ---
 
@@ -66,17 +66,20 @@ Generated talking heads feel "AI" when the head stays centered like a passport p
    - **`PipSpeaker`:** `transformOrigin: '50% 100%'`, gentle breathing sway `translateX: Math.sin(local / 12) * 3.5`, subtle tilt `rotate: Math.sin(local / 9) * 0.35deg`, and slow push-in `scale: 1.0 -> 1.03`.
    - **`FullscreenSpeaker`:** Dynamic engagement zoom `scale: 1.0 -> 1.055` paired with smooth handheld drift `translate(Math.sin(local / 7) * 5, Math.cos(local / 9) * 4)`.
 
-### C. Spoken Italian Diction & Voice Lock
+### C. Spoken Italian Diction & 4-Stage Broadcast Voice Lock
 - Keep identical acoustic lock in every Flow prompt:
   `Voice Lock: 26-year-old female Northern Italian speaker, crisp warm mid-alto chest voice, natural conversational pitch around 195Hz, steady dynamic consistency, close-mic dry smartphone room acoustics, zero background music.`
 - Write numbers and acronyms phonetically in Italian (`"cento euro"`, `"dalle dieci alle venti ore"`, `"cinque ore"`, `"GPT sei"`, `"G-L-M"`), punctuate commas intentionally, and use `"clear well-articulated Italian diction without rushing, pausing cleanly on every comma"`.
-- If vocal timbre ever varies subtly across two rooms, unify all generated `.mp4` audio via `scripts/elevenlabs_voice_ref.py --unify-dir` (`eleven_multilingual_sts_v2`) preserving 1:1 lip-sync without spending Flow credits.
+- **Zero-Drift Post-Production Voice Pipeline (`elevenlabs_voice_ref.py` + `match-audio`):**
+  1. Clone `@Eva`'s `~34s` multi-inflection golden master (`resources/eva_voice_master.wav`, rebuildable via `--build-golden-sample`) once (`--clone-voice Eva --save-env`).
+  2. Unify all generated `.mp4` clips in **ONE single concatenated Speech-to-Speech API call** (`--unify-dir`, default single-pass mode: de-rooms audio -> `eleven_multilingual_sts_v2` with `stability=0.78, similarity_boost=0.86, style=0.0, use_speaker_boost=True, seed=424242` -> slices at silence valleys -> locks exact millisecond lip-sync at `-14 LUFS`).
+  3. Match spectral balance locally across rooms at **0 API cost** via `gflow_batch_ingest.py match-audio clip.mp4 --ref golden.mp4 --out matched.mp4` (`highpass=80Hz` + 8-band EQ + `2.5:1` gentle compression + 2-pass linear `-14 LUFS`).
 
-### D. 5-Block Anti-AI UGC Prompt Architecture (Reddit / GitHub / YouTube Proven Structure)
-When writing any `@Eva` scene for **Google Flow (`Omni 1.2 Flash`)**, **Veo 3.1**, or **Seedance 2.5**, assemble every prompt cleanly using these 5 explicit blocks so the clip never drifts into plastic studio AI:
-1. **`[Shot & Optics]`:** Vertical 9:16 handheld smartphone front camera, arm's-length medium-close chest-up portrait (`15%` clean wall headroom above her dark-brown bun), subtle organic handheld micro-jitter.
-2. **`[Environment & Uneven Daylight]`:** Matching the locked room plate (`pale-grey plaster wall` or `warm cream wardrobe corner`), realistic soft asymmetrical indoor window light falling on one side, natural corner falloff, subtle smartphone sensor noise.
-3. **`[Subject & Biological Flaws]`:** Natural skin texture with fine pores and peach fuzz, authentic mild under-eye contour, organic asymmetrical blinking cadence, subtle amused micro-smirk / eyebrow inflection on emphasis, moist corneal reflections behind round tortoiseshell glasses, matte charcoal cotton t-shirt + delicate gold chain.
+### D. 5-Block Anti-AI UGC + `MCSLA` Prompt Architecture (YouTube `@noisygroup` / `higgsfield-ai` / Reddit Proven)
+Keep total prompt length focused (`< 200` words core `MCSLA`: *Model/Optics · Camera · Subject · Look/Light · Action*) assembled in 5 clean blocks so identity never drifts into glossy AI:
+1. **`[Shot & Optics]`:** Vertical 9:16 handheld smartphone front camera (`24mm`), arm's-length medium-close chest-up portrait (`15%` clean wall headroom above her dark-brown bun), subtle organic handheld micro-jitter.
+2. **`[Environment & Relighting Direction]`:** Explicit room & directional light physics from the locked still (`"soft window daylight hitting the camera-left cheekbone and wrapping subtly around tortoiseshell glasses & wispy curls"`, matching `eva_canonical_warm_armadio.png` or `gen-room-anchor` output).
+3. **`[Subject & Verbatim Biological Tokens]`:** Keep descriptive tokens 100% identical across all scenes: pores + peach fuzz, mild under-eye contour, small cheek beauty mark under left eye, dark-brown messy high bun, round tortoiseshell eyeglasses, matte charcoal-black crew-neck cotton t-shirt, thin gold chain.
 4. **`[Physical Choreography]`:** One concrete action beat per clip: subtle axial forward lean on the hook (`"leaning gently toward the lens"`), brief upward spatial glance/point toward upper UI cards when in PIP (`"glancing briefly toward the upper frame before locking dark-brown eyes onto the lens"`), one varied chest-level female hand gesture, natural breath pause at commas.
 5. **`[Dry Close-Mic Acoustics & Anti-CGI Negatives]`:** `"Voice Lock: 26-year-old female Northern Italian speaker..."` + spoken line verbatim with phonetic numerals + `"No extra or warped fingers, no rings, no plastic airbrushed skin, no beauty filter, no ring light, no subtitles, no music."`
 

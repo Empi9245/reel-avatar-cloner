@@ -10,7 +10,7 @@ description: >-
   prompt generation (Google Flow / Seedance 2.5 / Higgsfield), VP9 true-alpha 3D pop-out PIP compositing in
   Remotion, and final multi-platform IG/TikTok assembly.
 metadata:
-  version: 2.0.0
+  version: 2.1.0
 license: MIT
 ---
 
@@ -20,18 +20,18 @@ Replicates viral Reels/TikToks and generates voice-consistent spoken avatar scen
 
 All scripts and bundled assets live inside this skill folder:
 - CLI reel pipeline: [scripts/reel_cloner.py](./scripts/reel_cloner.py)
-- Reusable Flow check, silence trim, LAB gamma=1.10 grading & VP9 true-alpha 3D pop-out PIP utility: [scripts/gflow_batch_ingest.py](./scripts/gflow_batch_ingest.py)
+- Reusable Flow check, silence trim, LAB gamma=1.10 grading, `gen-room-anchor` multi-room relighting, `pick-anchor`, `match-audio` EQ/LUFS lock & VP9 true-alpha 3D pop-out PIP utility: [scripts/gflow_batch_ingest.py](./scripts/gflow_batch_ingest.py)
 - Local Unsloth MiniMax-H3 Ref2VA CLI bridge: [scripts/unsloth_h3_video.py](./scripts/unsloth_h3_video.py)
 - Direct Gemini API (Veo) CLI bridge (`GEMINI_API_KEY`): [scripts/gemini_veo_video.py](./scripts/gemini_veo_video.py)
-- ElevenLabs v4/v3 voice reference, Instant Voice Cloning (`--clone-voice`), & Speech-to-Speech multi-clip voice unification (`--s2s-in` / `--unify-dir`): [scripts/elevenlabs_voice_ref.py](./scripts/elevenlabs_voice_ref.py)
+- ElevenLabs v4/v3 voice reference, 34s golden sample builder (`--build-golden-sample`), IVC cloning (`--clone-voice`), TTS request stitching (`--stitch-file`) & Single-Pass Concatenated Speech-to-Speech unification (`--unify-dir` with locked `stability=0.78, similarity=0.86, seed=424242`): [scripts/elevenlabs_voice_ref.py](./scripts/elevenlabs_voice_ref.py)
 - `.env` template for ElevenLabs API credentials: [.env.example](./.env.example)
 - **Artistic direction, natural acting choreography, 3D alpha PIP compositing & 1:1 intake playbook:** [references/artistic-direction-and-realism.md](./references/artistic-direction-and-realism.md)
-- **Multi-clip consistency handbook, Google Flow Star Topology, `gflow-cli` automation & local Unsloth MiniMax-H3 Ref2VA guide:** [references/multi-clip-consistency-and-local-h3.md](./references/multi-clip-consistency-and-local-h3.md)
+- **Multi-clip consistency handbook, Single-Face Multi-Room Law, `gflow-cli` automation & local Unsloth MiniMax-H3 Ref2VA guide:** [references/multi-clip-consistency-and-local-h3.md](./references/multi-clip-consistency-and-local-h3.md)
 - Voice Consistency & Character Reference templates (Cast Kit v1 + Voice Sheet v1 + Shot Caller v2): [references/voice-and-character-reference.md](./references/voice-and-character-reference.md)
 - Google Flow prompt, anti-filter, CTA safety & eye-gaze rules: [references/flow-prompts-and-safety.md](./references/flow-prompts-and-safety.md)
 - CTA & DM conversion funnel by platform: [references/cta-and-dm-funnel.md](./references/cta-and-dm-funnel.md)
 - Dual audio matching & TikTok sound search: [references/audio-and-sound-matching.md](./references/audio-and-sound-matching.md)
-- Assets (`Eva` references + dressed anchor `eva_con_tshirt.png` + master voice `eva_voice_master.wav` + iOS emoji PNGs): [resources/](./resources/)
+- Assets (`@Eva` canonical warm-wardrobe smartphone anchor `eva_canonical_warm_armadio.png` + `eva_con_tshirt.png` + `34s` multi-inflection golden master `eva_voice_master.wav` + iOS emoji PNGs): [resources/](./resources/)
 
 ---
 
@@ -41,9 +41,9 @@ Whenever the user sends a reference Reel/TikTok + `@Eva` (or another avatar) + c
 
 1. **1:1 Concept & Framing Audit (`sheet_orig.jpg`):** Map every scene of the original video before generating anything — PIP card vs fullscreen placement, whether the speaker's head/hair breaks **3D out above the rounded PIP card**, chest-up shoulders/hands framing, and screen graphics (keep real B-roll via `temporal_4dof` or rebuild crisp vector cards 1:1 in Remotion).
 2. **Apply User Modifications Upfront:** Scrub any forbidden brand name across spoken dialogue, kinetic captions, browser URL bars, terminal installs, brand squircles, and DM bubbles (`••••••••`), and split `clip_06` into separate **Instagram (`commenta`)** and **TikTok (`seguici sul profilo e scrivi promo` / `Scrivi in DM`)** takes.
-3. **Single-Model Credit-Safe Flow Generation (`gflow-cli`):** Check credits (`python scripts/gflow_batch_ingest.py check`), lock strictly to **one model at minimum tier** (`--model omni-1.2-flash --resolution 360p`, ~5 credits/clip, never switch to `veo-fast` mid-reel), follow the **5 Physical Acting Laws** (15% bun headroom, forward lean on key beats, occasional upward glance/point toward the top card, varied feminine hand gestures, anti-slop smartphone grain & pores), and checkpoint with the user before final clips when requested.
-4. **Silence Trim + LAB Exposure Recovery + True-Alpha VP9 3D Pop-Out PIP:** Run `gflow_batch_ingest.py` (`trim` -> `grade` `gamma=1.10` to fix bright `r2v` clips at **0 credits** -> `popout-pip` encoding `1036x850` `VP9 yuva420p` `.webm` with `alpha_mode=1`). Never chop Eva's hair flat inside CSS `overflow: hidden`.
-5. **Piecewise-Linear Audio-First Sync & Handheld Camera Motion:** Map each sentence (`mapEvaFrame`) to Eva's real spoken length (`0.93x–1.06x` `atempo`), widen sub-1s fullscreen flashes to `1.1s–2.3s`, omit fake orange light-leaks, and layer `<OffthreadVideo transparent />` + subtle handheld sway/tilt/zoom (`SpeakerPipAndFull.tsx`).
+3. **Single-Face Multi-Room & Credit-Safe Generation (`gflow-cli` / `H3`):** Check credits (`python scripts/gflow_batch_ingest.py check`), lock strictly to **one model at minimum tier** (`--model omni-1.2-flash --resolution 360p`, ~5 credits/clip, never switch to `veo-fast` mid-reel). Use [resources/eva_canonical_warm_armadio.png](./resources/eva_canonical_warm_armadio.png) as `@Eva`'s canonical anchor; if moving into a second room, generate Room B via `gen-room-anchor` (`i2i` Stills-First relighting) instead of passing two different face sheets into `r2v`, keep prompts concise (`< 200` words `MCSLA` + 5 Acting Laws), and checkpoint with the user before final clips when requested.
+4. **Silence Trim + LAB Exposure + 4-Stage Voice Lock + 3D Alpha Pop-Out PIP:** Run `gflow_batch_ingest.py` (`trim --adaptive-loudnorm` -> `grade` `gamma=1.10` at **0 credits** -> `match-audio` 8-band EQ/`-14 LUFS`, plus single-pass concatenated ElevenLabs STS `elevenlabs_voice_ref.py --unify-dir` if API key configured -> `popout-pip` encoding `1036x850` `VP9 yuva420p` `.webm`). Never chop Eva's hair flat inside CSS `overflow: hidden`.
+5. **Piecewise-Linear Audio-First Sync, J-Cuts & Handheld Camera Motion:** Map each sentence (`mapEvaFrame`) to Eva's real spoken length (`0.93x–1.06x` `atempo`), widen sub-1s fullscreen flashes to `1.1s–2.3s`, omit fake orange light-leaks, add `3–5f` audio J-cuts + subtle UI SFX (`-24..-28 dBFS`), and layer `<OffthreadVideo transparent />` + subtle handheld sway/tilt/zoom (`SpeakerPipAndFull.tsx`).
 6. **Dual Render & Full Playback Audit:** Export separate `1080x1920 @ 30fps` Instagram and TikTok MP4s, inspect keyframe contact sheets AND play full MP4s via `read_file` before delivering.
 
 ---
